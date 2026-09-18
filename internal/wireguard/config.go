@@ -42,7 +42,10 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 	}
 
 	if !missing && semanticMatch(r, iface, link, spec) {
-		return changes, nil
+		// Still ensure AllowedIPs routes (except defaults) exist; bounce/up can drop them
+		// while the WG peer config remains unchanged.
+		n, err := ensureAllowedIPRoutes(r, iface, spec.Peer.AllowedIPs)
+		return changes + n, err
 	}
 
 	args := []string{"set", iface, "private-key", "/dev/stdin"}
@@ -87,9 +90,20 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 	}
 	changes++
 
+	n, err := ensureAllowedIPRoutes(r, iface, spec.Peer.AllowedIPs)
+	if err != nil {
+		return changes, err
+	}
+	return changes + n, nil
+}
+
+func ensureAllowedIPRoutes(r linux.Runner, iface string, allowed []netip.Prefix) (int, error) {
 	// Ensure AllowedIPs appear as routes (some environments suppress WG auto-routes).
-	for _, p := range spec.Peer.AllowedIPs {
-		if !p.IsValid() {
+	// Skip default routes: policy routing (fwmark → table 100) owns the default via
+	// the tunnel; installing 0.0.0.0/0 or ::/0 into main hijacks underlay/endpoint traffic.
+	changes := 0
+	for _, p := range allowed {
+		if !p.IsValid() || isDefaultRoute(p) {
 			continue
 		}
 		if _, err := r.Run("ip", "route", "replace", p.String(), "dev", iface); err != nil {
@@ -98,6 +112,10 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		changes++
 	}
 	return changes, nil
+}
+
+func isDefaultRoute(p netip.Prefix) bool {
+	return (p.Addr().Is4() && p.Bits() == 0) || (p.Addr().Is6() && p.Bits() == 0)
 }
 
 func semanticMatch(r linux.Runner, iface, link string, spec policy.WireGuardSpec) bool {

@@ -43,8 +43,9 @@ func TestReconcile_SemanticMatchNoChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("want 0 changes, got %d; calls=%v", n, r.Calls)
+	// Semantic match still ensures AllowedIPs routes (2 non-default prefixes).
+	if n != 2 {
+		t.Fatalf("want 2 route refreshes, got %d; calls=%v", n, r.Calls)
 	}
 	for _, c := range r.Calls {
 		if strings.Contains(c, "wg set") || strings.HasPrefix(c, "wg set") {
