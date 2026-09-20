@@ -146,7 +146,7 @@ func sampleNftList() string {
     elements = { 10.200.0.0/24 }
   }
   chain prerouting {
-    type filter hook prerouting priority -150; policy accept;
+    type filter hook prerouting priority mangle + 1; policy accept;
     meta nfproto ipv6 drop comment "drop-ipv6"
     ip daddr 10.10.0.0/24 return comment "exclude-lan"
     ip daddr 10.10.0.2 return comment "exclude-endpoint"
@@ -165,7 +165,7 @@ func sampleNftListJSON() string {
 {"metainfo":{"version":"1"}},
 {"table":{"family":"inet","name":"gotun"}},
 {"set":{"family":"inet","name":"ru_nets","table":"gotun","type":"ipv4_addr","flags":["interval"],"elem":["10.200.0.0/24"]}},
-{"chain":{"family":"inet","table":"gotun","name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
+{"chain":{"family":"inet","table":"gotun","name":"prerouting","type":"filter","hook":"prerouting","prio":-149,"policy":"accept"}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"drop-ipv6","expr":[]}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-endpoint","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"10.10.0.2"}}]}},

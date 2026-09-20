@@ -68,6 +68,8 @@ func runApply(args []string) error {
 		"drop IPv6 and disable it via sysctl (true|false); note clear cannot undo the sysctls")
 	markIface := fs.String("mark-iface", "",
 		"only mark traffic arriving on these interfaces (comma-separated); empty means any, which is unsafe on a router")
+	dryRun := fs.String("dry-run", "false",
+		"read real state but print every write instead of applying it (true|false)")
 	tunnelIface := fs.String("tunnel-iface", policy.DefaultTunnelIface,
 		"name of the tunnel interface to route through; must match the device that exists on the box"+
 			" (netifd names it after the UCI section, and UCI section names cannot contain hyphens)")
@@ -93,6 +95,7 @@ func runApply(args []string) error {
 		MarkIfaceCSV:    *markIface,
 		NonRoutableCSV:  *nonRoutable,
 		TunnelIface:     strings.TrimSpace(*tunnelIface),
+		DryRun:          truthy(*dryRun),
 	})
 }
 

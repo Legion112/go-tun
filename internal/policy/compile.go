@@ -52,7 +52,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Name:     "prerouting",
 			Type:     "filter",
 			Hook:     "prerouting",
-			Priority: -150, // mangle-like
+			Priority: MarkChainPriority,
 			Policy:   "accept",
 			Rules:    markRules(p, excludes, excludeAddrs, mark),
 		},

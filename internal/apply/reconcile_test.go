@@ -1,6 +1,7 @@
 package apply_test
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
 	"strings"
@@ -320,5 +321,35 @@ func TestClear_AbsentObjectsAreNotFailures(t *testing.T) {
 	}
 	if err := apply.Clear(r); err != nil {
 		t.Fatalf("clearing an already-clean box must succeed: %v", err)
+	}
+}
+
+// The property that makes -dry-run trustworthy: a full reconcile through the dry
+// runner issues no writes to the host at all. Asserted over the real command
+// surface rather than a sample, so a future subsystem that reaches for some new
+// verb is caught here instead of on the router.
+func TestReconcile_DryRunIssuesNoWrites(t *testing.T) {
+	inner := linux.NewRecordingRunner()
+	var out bytes.Buffer
+	d := &linux.DryRunner{Inner: inner, Out: &out}
+
+	if _, err := apply.Reconcile(d, directSNATPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if d.Writes == 0 {
+		t.Fatal("an empty box needs changes, so some writes should have been withheld")
+	}
+	for _, c := range inner.Calls {
+		if strings.HasPrefix(c, "STDIN:") {
+			t.Fatalf("a piped script reached the host: %q", c)
+		}
+		for _, verb := range []string{" add ", " del ", " delete ", " replace ", " flush ", " set ", " -f ", " -w "} {
+			if strings.Contains(c+" ", verb) {
+				t.Errorf("mutating command reached the host: %q", c)
+			}
+		}
+	}
+	if !strings.Contains(out.String(), "DRY-RUN:") {
+		t.Fatal("expected the withheld commands to be printed")
 	}
 }

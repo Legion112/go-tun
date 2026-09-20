@@ -70,6 +70,8 @@ type ApplyOptions struct {
 	NonRoutableCSV  string
 	// TunnelIface overrides the routed interface name. Empty keeps the default.
 	TunnelIface string
+	// DryRun reads real state but prints every write instead of applying it.
+	DryRun bool
 }
 
 // parsePrefixCSV parses a comma-separated CIDR list.
@@ -206,9 +208,19 @@ func Apply(o ApplyOptions) error {
 		p.InboundWireGuard = cfg
 	}
 
-	res, err := apply.Reconcile(linux.ExecRunner{}, p)
+	var runner linux.Runner = linux.ExecRunner{}
+	dry := &linux.DryRunner{Inner: linux.ExecRunner{}, Out: os.Stdout}
+	if o.DryRun {
+		runner = dry
+	}
+
+	res, err := apply.Reconcile(runner, p)
 	if err != nil {
 		return err
+	}
+	if o.DryRun {
+		fmt.Printf("gotun apply: DRY RUN, %d commands withheld (%d semantic changes)\n", dry.Writes, res.Changes)
+		return nil
 	}
 	if sum := res.Summary(); sum != "" {
 		fmt.Printf("gotun apply: %d changes (%s)\n", res.Changes, sum)

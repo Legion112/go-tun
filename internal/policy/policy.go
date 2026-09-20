@@ -79,6 +79,19 @@ const (
 	// SrcNatPriority is nft's "srcnat" hook priority, where source NAT belongs.
 	SrcNatPriority = 100
 
+	// MarkChainPriority is where the classifier sits in the prerouting hook.
+	//
+	// One past mangle (-150) rather than on it. iptables' mangle PREROUTING
+	// registers at exactly -150, and the order between two hook functions at the
+	// same priority is not defined -- it falls out of registration order, so it
+	// would depend on boot timing. -149 is deterministically after anything in
+	// mangle and still far ahead of nat prerouting at -100, so the mark is set
+	// before any NAT decision is made.
+	//
+	// nft renders this back as "mangle + 1", which is why comparing chain
+	// priorities as text does not work.
+	MarkChainPriority = -149
+
 	// TunnelRouteMetric is preferred while wg-exit is usable.
 	TunnelRouteMetric = 10
 	// FailClosedRouteMetric is the permanent terminal fallback in table 100.

@@ -628,3 +628,28 @@ func TestCompile_TunnelInterfaceIsHonoured(t *testing.T) {
 		t.Fatalf("WireGuard spec interface: %q", st.WireGuard.Interface)
 	}
 }
+
+// The classifier must not share a priority with iptables' mangle PREROUTING at
+// -150: the order between two hook functions at equal priority is undefined, so
+// on a box that also uses mangle marks the outcome would depend on which
+// registered first. One past it is deterministic, and still well ahead of nat
+// prerouting at -100 so the mark is set before any NAT decision.
+func TestCompile_MarkChainSitsPastMangle(t *testing.T) {
+	st, err := policy.Compile(testPolicy(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range st.Nft.Chains {
+		if ch.Hook != "prerouting" || ch.Type != "filter" {
+			continue
+		}
+		if ch.Priority != -149 {
+			t.Fatalf("classifier priority is %d; -150 collides with iptables mangle", ch.Priority)
+		}
+		if ch.Priority >= -100 {
+			t.Fatalf("priority %d is not before nat prerouting", ch.Priority)
+		}
+		return
+	}
+	t.Fatal("no filter prerouting chain compiled")
+}
