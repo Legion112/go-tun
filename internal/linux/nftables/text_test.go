@@ -240,3 +240,30 @@ func TestCountSetElements_FallsBackToTextListing(t *testing.T) {
 		t.Fatalf("want 3 elements from the text listing, got %d", n)
 	}
 }
+
+// nft prints a /32 element as a bare address. The desired side always carries a
+// prefix length, so without normalising, those elements never match and the whole
+// table is deleted and rebuilt on every single apply. Seen for real: 366 of the
+// gateway's 12106 elements print this way.
+func TestParseNftText_BareAddressIsNormalisedToAHostPrefix(t *testing.T) {
+	live, err := parseNftText(`table inet gotun {
+	set ru_nets {
+		type ipv4_addr
+		flags interval
+		elements = { 2.16.10.221, 2.16.10.222/31,
+			     10.200.0.0/24 }
+	}
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := live.sets["ru_nets"]
+	for _, want := range []string{"2.16.10.221/32", "2.16.10.222/31", "10.200.0.0/24"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %s; got %v", want, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 elements, got %d: %v", len(got), got)
+	}
+}

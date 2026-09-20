@@ -2,6 +2,7 @@ package nftables
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -135,9 +136,19 @@ func parseElementList(s string) map[string]struct{} {
 		if i := strings.IndexAny(part, " \t"); i >= 0 {
 			part = part[:i]
 		}
-		if part != "" && part != "{" && part != "}" {
-			out[part] = struct{}{}
+		if part == "" || part == "{" || part == "}" {
+			continue
 		}
+		// nft prints a single address with no prefix length. The desired side
+		// always carries one, so without normalising, every such element is a
+		// mismatch and the whole table is deleted and rebuilt on every apply.
+		// Observed on the live gateway: 366 of 12106 elements print this way.
+		if !strings.Contains(part, "/") {
+			if a, err := netip.ParseAddr(part); err == nil {
+				part = netip.PrefixFrom(a, a.BitLen()).String()
+			}
+		}
+		out[part] = struct{}{}
 	}
 	return out
 }
