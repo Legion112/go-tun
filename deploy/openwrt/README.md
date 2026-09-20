@@ -40,6 +40,30 @@ the ip rule and nft table are gone too (they are kernel state, not files), so
 traffic quietly reverts to going out the ISP for everything. Nothing breaks, which
 is exactly why it is easy to miss.
 
+## Known blocker on GL.iNet Flint 2 (MT7986, OpenWrt 21.02)
+
+**This router cannot terminate the tunnel itself.** Locally-originated UDP is
+dropped on WAN egress, while locally-originated ICMP and TCP egress normally and
+forwarded/NATed UDP egresses normally. Measured at both ends:
+
+| from Flint's own stack, to the VPS | result |
+|---|---|
+| ICMP | arrives |
+| TCP 22 | arrives, full handshake and SSH banner |
+| UDP (any port) | never arrives |
+| UDP, but *forwarded* from a LAN host through Flint's NAT | arrives |
+
+The last two rows are indistinguishable on the wire — same source IP after
+masquerade, same protocol, same destination, both new flows — so it is not the
+ISP and not DPI. Flint's own UDP also works fine out `br-lan`, so it is specific
+to the WAN path. nft counters in the `postrouting` hook confirm the packets get
+that far, so the loss is below netfilter, in the driver or hardware path.
+
+The consequence is not specific to WireGuard: any UDP-based tunnel originating on
+this router will fail. gotun's classifier itself works perfectly here — marking,
+the mark-to-table lookup, and RU-direct were all verified — so the workable shapes
+are to keep tunnel termination on a separate box, or to fix/replace the firmware.
+
 ## Rollback
 
 One command, and it takes effect immediately:

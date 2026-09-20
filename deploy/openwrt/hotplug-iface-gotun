@@ -12,6 +12,12 @@
 
 [ "$ACTION" = ifup ] || exit 0
 
+# Only when the service is actually enabled. Without this check the hook happily
+# re-arms the policy on any ifup -- including an ifup done while debugging a
+# broken tunnel, which is exactly how it silently put every LAN client back onto
+# a dead path after the operator had torn the policy down on purpose.
+/etc/init.d/gotun enabled 2>/dev/null || exit 0
+
 CONF=/etc/gotun/gotun.conf
 [ -f "$CONF" ] || exit 0
 # shellcheck source=/dev/null
