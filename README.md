@@ -65,6 +65,12 @@ Reconciler only touches objects it owns:
 
 `gotun clear` deletes those owned objects only.
 
+## ICMP redirects
+
+`gotun apply` sets `net.ipv4.conf.all.send_redirects=0`, the `default` equivalent, and the same per **LAN-facing interface** (discovered from the `-lan` prefixes). The kernel ORs the `all` and per-device values, so clearing `all` alone leaves redirects enabled on any interface whose own value is `1`.
+
+A policy-routing gateway must not emit redirects: for direct-class traffic the next hop is on the same interface the packet arrived on, so the kernel would tell the client "reach that yourself", and the client then caches a route that bypasses the gateway. Today the egress is identical either way, but the client's route table stops reflecting the policy — `ip route get <direct-ip>` on a client shows the ISP router, which looks exactly like a failed cutover.
+
 ## Idempotency
 
 Re-applying the **same** `Policy` must be a **semantic no-op** (no meaningful kernel changes). Equality is by table/set/rule/route/sysctl content — not nft handle numbers.
@@ -197,6 +203,44 @@ UDP responses with **TC** are retried over TCP on the **same** Direct/Exit diale
 Interfaces: exit hop default **`wg-exit`**; inbound clients **`wg-clients`**.
 
 GeoDNS lab: `TestDNSSplit_GeoEgressIdentity` under `make test-integration` (`labdns` answers by query source IP).
+
+### Client cutover (`gotun-client`)
+
+Points a **client** host's default route at the gotun gateway and its DNS at the gateway-side resolver, keeping every on-link LAN reachable, and restores the previous settings on `disable`. NetworkManager only.
+
+```bash
+gotun-client status                      # read-only; safe unprivileged
+gotun-client enable  -dry-run            # print the exact nmcli commands, change nothing
+gotun-client enable                      # snapshot -> arm rollback -> apply -> verify
+gotun-client confirm                     # cancel the armed rollback
+gotun-client verify  -foreign-ip <ip> -ru-ip <ip> \
+  -expect-foreign-egress <exit-public-ip> -expect-ru-egress <isp-wan-ip>
+gotun-client disable                     # restore the snapshot
+```
+
+**Why not `ipv4.gateway`.** NetworkManager only materialises `ipv4.gateway` alongside a static `ipv4.addresses`, so on a DHCP profile (`ipv4.method=auto`) it is silently inert. `enable` instead sets `ipv4.never-default yes` and appends an explicit default to `ipv4.routes`:
+
+```
+nmcli connection modify <con> ipv4.never-default yes \
+  +ipv4.routes "0.0.0.0/0 <gateway>" \
+  ipv4.ignore-auto-dns yes ipv4.dns <dns> ipv6.ignore-auto-dns yes
+```
+
+`+ipv4.routes` appends, so a pre-existing static route survives; `enable` refuses outright when `ipv4.routes` is already set unless `-force`.
+
+**`-apply-mode`** is an escalation ladder, so the risky form is never the first one tried:
+
+| Mode | Command | Link bounce | Survives reboot | Revert |
+|------|---------|-------------|-----------------|--------|
+| `device` (default) | `nmcli device modify` (D-Bus reapply) | no — an SSH session over the interface survives | no | `nmcli device reapply` |
+| `temporary` | `nmcli connection modify --temporary` + `up` | yes | no | restart NetworkManager |
+| `persistent` | `nmcli connection modify` + `up` | yes | **yes** | `disable`, or a console |
+
+**Safety contract.** The snapshot is written before anything is mutated, and the automatic rollback is armed *before* the apply, as a transient systemd timer — the countdown is held by PID 1, so it survives the process exiting, the SSH session dropping, and `kill -9`. `enable` then asserts that the default route moved, that exactly one default route exists, and that no protected LAN hairpins through the gateway; any failure rolls back. A rollback failure reports both errors and deliberately leaves the timer armed. `-detach` (default on for link-bouncing modes) re-runs the apply under a transient unit so the SSH drop it causes cannot kill it mid-change.
+
+**Protected LAN set** = every IPv4 prefix on an UP non-loopback interface, plus each repeatable `-lan CIDR`. A multi-homed host keeps *all* of its prefixes on-link; two hosts per prefix are probed, because a stale per-destination route exception can make a single probe read on-link when the prefix is not.
+
+**Gateway-side requirement.** The exit peer's `AllowedIPs` must include every client LAN that will source traffic through the tunnel, **and** that LAN must be source-NATed on the way out. `AllowedIPs` alone only gets the packet accepted and routed: without SNAT it leaves the exit host with an RFC1918 source, is dropped upstream, and no reply is ever generated — while `wg show` counters still climb and the tunnel looks healthy. Symptom: connections hang rather than fail.
 
 ## Out of scope (v1)
 

@@ -36,10 +36,15 @@ type Policy struct {
 	TunnelInterface string
 	TunnelEndpoint  netip.Addr
 	LANs            []netip.Prefix
-	Mark            uint32
-	Table           int
-	RulePriority    int
-	FailMode        FailMode
+	// LANIfaces are the client-facing interface names. They exist so
+	// send_redirects can be disabled per device: the kernel ORs the "all" and
+	// per-device values, so clearing "all" alone leaves redirects enabled on
+	// any interface whose own value is 1.
+	LANIfaces    []string
+	Mark         uint32
+	Table        int
+	RulePriority int
+	FailMode     FailMode
 	// TunnelUp indicates whether the WireGuard interface should carry traffic.
 	// When true, table 100 prefers default via the tunnel device; a higher-metric
 	// blackhole always remains so an unexpected wg-exit loss cannot fall through to main.

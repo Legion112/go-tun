@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/legion/go-tun/internal/policy"
@@ -189,5 +190,67 @@ func TestCompile_InboundRequiresLANs(t *testing.T) {
 	p.InboundWireGuard = policy.WireGuardConfig{PrivateKey: "x"}
 	if _, err := policy.Compile(p); err == nil {
 		t.Fatal("expected error when inbound WG without LANs")
+	}
+}
+
+func TestCompile_DisablesSendRedirectsIncludingPerDevice(t *testing.T) {
+	p := policy.Policy{
+		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
+		TunnelInterface: "wg-exit",
+		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		LANs:            []netip.Prefix{netip.MustParsePrefix("192.168.8.0/24")},
+		LANIfaces:       []string{"enp1s0"},
+		Mark:            0x1,
+		Table:           100,
+		RulePriority:    100,
+		FailMode:        policy.FailClosed,
+		TunnelUp:        true,
+	}
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, s := range st.Sysctls {
+		got[s.Key] = s.Value
+	}
+	// The kernel ORs "all" with the per-device value, so both must be zero:
+	// clearing "all" alone leaves redirects enabled on a device set to 1.
+	for _, key := range []string{
+		"net.ipv4.conf.all.send_redirects",
+		"net.ipv4.conf.default.send_redirects",
+		"net.ipv4.conf.enp1s0.send_redirects",
+	} {
+		if got[key] != "0" {
+			t.Errorf("%s = %q, want 0", key, got[key])
+		}
+	}
+	if got["net.ipv4.ip_forward"] != "1" {
+		t.Errorf("ip_forward should still be 1, got %q", got["net.ipv4.ip_forward"])
+	}
+}
+
+func TestCompile_NoLANIfacesStillClearsAll(t *testing.T) {
+	st, err := policy.Compile(policy.Policy{
+		TunnelInterface: "wg-exit",
+		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		Mark:            0x1, Table: 100, RulePriority: 100,
+		FailMode: policy.FailClosed, TunnelUp: true,
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	found := false
+	for _, s := range st.Sysctls {
+		if s.Key == "net.ipv4.conf.all.send_redirects" && s.Value == "0" {
+			found = true
+		}
+		if strings.Contains(s.Key, "conf..send_redirects") {
+			t.Fatalf("empty interface name leaked into a sysctl key: %q", s.Key)
+		}
+	}
+	if !found {
+		t.Fatal("all.send_redirects should be cleared even with no LAN interfaces")
 	}
 }

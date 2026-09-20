@@ -96,11 +96,17 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 		}
 	}
 
+	lanIfaces, err := linux.InterfacesForPrefixes(lans)
+	if err != nil {
+		return err
+	}
+
 	p := policy.Policy{
 		DirectPrefixes:  prefs,
 		TunnelInterface: policy.DefaultTunnelIface,
 		TunnelEndpoint:  ep,
 		LANs:            lans,
+		LANIfaces:       lanIfaces,
 		Mark:            policy.DefaultMark,
 		Table:           policy.DefaultTableID,
 		RulePriority:    policy.DefaultRulePriority,

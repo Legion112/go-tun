@@ -93,12 +93,33 @@ func Compile(p Policy) (DesiredKernelState, error) {
 		})
 	}
 
+	// A policy-routing gateway must not emit ICMP redirects. When a client
+	// sends direct-destined traffic here, the next hop is on the same interface
+	// the packet arrived on, so the kernel would tell the client "go to the ISP
+	// router yourself" -- the client then caches a route that bypasses this box
+	// entirely. Today that only affects the direct class, where the egress is
+	// the same either way, but it means a client's own route table stops
+	// reflecting the policy, and any future per-destination decision here would
+	// be silently ignored.
+	//
+	// The kernel ORs the "all" and per-device values for send_redirects, so
+	// both have to be zero: "all" alone is not enough.
+	sysctls := []SysctlSpec{
+		{Key: "net.ipv4.ip_forward", Value: "1"},
+		{Key: "net.ipv6.conf.all.disable_ipv6", Value: "1"},
+		{Key: "net.ipv6.conf.default.disable_ipv6", Value: "1"},
+		{Key: "net.ipv4.conf.all.send_redirects", Value: "0"},
+		{Key: "net.ipv4.conf.default.send_redirects", Value: "0"},
+	}
+	for _, dev := range p.LANIfaces {
+		sysctls = append(sysctls, SysctlSpec{
+			Key:   "net.ipv4.conf." + dev + ".send_redirects",
+			Value: "0",
+		})
+	}
+
 	state := DesiredKernelState{
-		Sysctls: []SysctlSpec{
-			{Key: "net.ipv4.ip_forward", Value: "1"},
-			{Key: "net.ipv6.conf.all.disable_ipv6", Value: "1"},
-			{Key: "net.ipv6.conf.default.disable_ipv6", Value: "1"},
-		},
+		Sysctls: sysctls,
 		Nft: NftSpec{
 			Family: OwnedNftFamily,
 			Table:  OwnedNftTable,

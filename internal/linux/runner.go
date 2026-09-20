@@ -93,6 +93,10 @@ func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string
 				strings.Contains(cmd, "cat /proc/sys/net/ipv6/conf/default/disable_ipv6") {
 				return "1", nil
 			}
+			// send_redirects converges to 0, not 1.
+			if strings.Contains(cmd, "send_redirects") && strings.Contains(cmd, "cat /proc/sys/") {
+				return "0", nil
+			}
 		}
 		if name == "sysctl" && len(args) >= 2 && args[0] == "-n" {
 			switch args[1] {
@@ -100,6 +104,9 @@ func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string
 				return "1", nil
 			case "net.ipv6.conf.all.disable_ipv6", "net.ipv6.conf.default.disable_ipv6":
 				return "1", nil
+			}
+			if strings.Contains(args[1], "send_redirects") {
+				return "0", nil
 			}
 		}
 		if name == "ip" && len(args) >= 1 && args[0] == "rule" {
