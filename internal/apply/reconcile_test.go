@@ -221,3 +221,34 @@ func TestReconcile_FailedComponentIsStillReported(t *testing.T) {
 		}
 	}
 }
+
+// Nothing may pass "-" or /dev/stdin to a command that reads piped input. Both
+// work on a desktop and neither exists on a stock OpenWrt root, where the result
+// is that every nft write and every private-key load fails -- so this would look
+// perfectly healthy in CI and take the gateway out entirely.
+func TestReconcile_PipedInputUsesProcfsPath(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	if _, err := apply.Reconcile(r, basePolicy()); err != nil {
+		t.Fatal(err)
+	}
+	piped := 0
+	for _, c := range r.Calls {
+		if !strings.Contains(c, "<<STDIN>>") {
+			continue
+		}
+		piped++
+		for _, bad := range []string{" -f -", "/dev/stdin"} {
+			if strings.Contains(c, bad) {
+				t.Errorf("%q passes %q; use linux.StdinPath", c, bad)
+			}
+		}
+		// The literal, not linux.StdinPath: comparing against the constant would
+		// make this pass for whatever the constant happens to say.
+		if !strings.Contains(c, "/proc/self/fd/0") {
+			t.Errorf("%q pipes input but names no readable path", c)
+		}
+	}
+	if piped == 0 {
+		t.Fatal("expected at least one piped command (the nft batch)")
+	}
+}

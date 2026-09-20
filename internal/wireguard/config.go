@@ -48,7 +48,7 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		return changes + n, err
 	}
 
-	args := []string{"set", iface, "private-key", "/dev/stdin"}
+	args := []string{"set", iface, "private-key", linux.StdinPath}
 	if spec.ListenPort > 0 {
 		args = append(args, "listen-port", fmt.Sprintf("%d", spec.ListenPort))
 	}

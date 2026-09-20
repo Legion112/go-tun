@@ -21,10 +21,9 @@ func Reconcile(r linux.Runner, spec policy.NftSpec) (int, error) {
 	changes := 0
 	family, table := spec.Family, spec.Table
 
-	listedJSON, err := r.Run("nft", "-j", "list", "table", family, table)
-	tableExists := err == nil && listedJSON != "" && !strings.Contains(listedJSON, "Error")
+	live, tableExists := listLiveTable(r, family, table)
 
-	if tableExists && semanticMatchJSON(listedJSON, spec) {
+	if tableExists && semanticMatch(live, spec) {
 		return 0, nil
 	}
 
@@ -33,7 +32,7 @@ func Reconcile(r linux.Runner, spec policy.NftSpec) (int, error) {
 		fmt.Fprintf(&b, "delete table %s %s\n", family, table)
 	}
 	b.WriteString(RenderFullTable(spec))
-	if _, err := r.RunWithInput("nft", b.String(), "-f", "-"); err != nil {
+	if _, err := r.RunWithInput("nft", b.String(), "-f", linux.StdinPath); err != nil {
 		return changes, fmt.Errorf("nft apply table: %w", err)
 	}
 	changes++
@@ -69,11 +68,45 @@ type liveRule struct {
 	Masquerade bool
 }
 
+// listLiveTable reads the owned table, preferring JSON and falling back to text.
+//
+// The fallback is not a nicety. OpenWrt ships nftables-nojson, where "nft -j"
+// fails for every table -- and a failure here used to mean "table absent", so the
+// delete was skipped, the rewrite became a pure append, and gotun silently
+// stopped honouring -lan and -endpoint changes on exactly the class of box this
+// is being deployed to. Existence is therefore established from whichever listing
+// works, never from JSON alone.
+//
+// When the table is there but cannot be parsed, it reports exists=true with no
+// contents: that compares as drift and rewrites the table, which is the safe
+// direction to fail in.
+func listLiveTable(r linux.Runner, family, table string) (liveNft, bool) {
+	if out, err := r.Run("nft", "-j", "list", "table", family, table); err == nil &&
+		out != "" && !strings.Contains(out, "Error") {
+		if live, perr := parseNftJSON(out); perr == nil {
+			return live, true
+		}
+	}
+	out, err := r.Run("nft", "list", "table", family, table)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return liveNft{}, false
+	}
+	live, perr := parseNftText(out)
+	if perr != nil {
+		return liveNft{}, true
+	}
+	return live, true
+}
+
 func semanticMatchJSON(out string, spec policy.NftSpec) bool {
 	live, err := parseNftJSON(out)
 	if err != nil {
 		return false
 	}
+	return semanticMatch(live, spec)
+}
+
+func semanticMatch(live liveNft, spec policy.NftSpec) bool {
 	if live.sets == nil {
 		live.sets = map[string]map[string]struct{}{}
 	}
@@ -769,19 +802,33 @@ func SwapSetElements(r linux.Runner, family, table, liveName string, elements []
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set %s %s %s\n", family, table, liveName)
 	writeBatchedElements(&b, family, table, liveName, elements)
-	if _, err := r.RunWithInput("nft", b.String(), "-f", "-"); err != nil {
+	if _, err := r.RunWithInput("nft", b.String(), "-f", linux.StdinPath); err != nil {
 		return 0, err
 	}
 	return 1, nil
 }
 
-// CountSetElements returns the number of elements in an nft set via nft -j.
+// CountSetElements returns the number of elements in an nft set, preferring JSON
+// and falling back to the plain listing where nft has no JSON support.
 func CountSetElements(r linux.Runner, family, table, setName string) (int, error) {
-	out, err := r.Run("nft", "-j", "list", "set", family, table, setName)
+	if out, err := r.Run("nft", "-j", "list", "set", family, table, setName); err == nil {
+		if n, cerr := countElementsJSON(out); cerr == nil {
+			return n, nil
+		}
+	}
+	out, err := r.Run("nft", "list", "set", family, table, setName)
 	if err != nil {
 		return 0, err
 	}
-	return countElementsJSON(out)
+	live, perr := parseNftText(out)
+	if perr != nil {
+		return 0, perr
+	}
+	elems, ok := live.sets[setName]
+	if !ok {
+		return 0, fmt.Errorf("set %s not found in listing", setName)
+	}
+	return len(elems), nil
 }
 
 func countElementsJSON(out string) (int, error) {

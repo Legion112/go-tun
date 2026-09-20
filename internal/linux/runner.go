@@ -8,6 +8,20 @@ import (
 	"strings"
 )
 
+// StdinPath is the path to pass to a command that reads a file but should read
+// what we piped it instead.
+//
+// Neither of the obvious spellings is portable enough. "nft -f -" makes nft open
+// /dev/stdin, and "wg set ... private-key /dev/stdin" does the same, but that
+// path does not exist on a stock OpenWrt root: there is no /dev/std* symlink
+// farm, so every nft write and every key load fails. /proc/self/fd/0 is created
+// by procfs itself and is present anywhere /proc is mounted, which includes
+// every target here.
+//
+// Passing a path rather than writing a temp file is deliberate for the private
+// key: a temp file would put it on disk, however briefly.
+const StdinPath = "/proc/self/fd/0"
+
 // Runner executes external commands (nft, ip, sysctl, wg).
 type Runner interface {
 	Run(name string, args ...string) (stdout string, err error)
