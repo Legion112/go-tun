@@ -1,6 +1,7 @@
 package apply_test
 
 import (
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -250,5 +251,74 @@ func TestReconcile_PipedInputUsesProcfsPath(t *testing.T) {
 	}
 	if piped == 0 {
 		t.Fatal("expected at least one piped command (the nft batch)")
+	}
+}
+
+// Clear is the rollback path, so a failure has to surface. It used to return nil
+// unconditionally, which made "exit 0" no evidence that anything was removed.
+func TestClear_FailureIsReported(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.FailOn = "nft delete table"
+	if err := apply.Clear(r); err == nil {
+		t.Fatal("a failed teardown must not report success")
+	}
+}
+
+// Every subsystem is still attempted after one fails; a teardown that stops at
+// the first error leaves the box half-configured.
+func TestClear_ContinuesPastAFailure(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.FailOn = "nft delete table"
+	_ = apply.Clear(r)
+	joined := strings.Join(r.Calls, "\n")
+	for _, want := range []string{"ip rule del priority", "nft delete table", "ip link del dev wg-exit"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("teardown skipped %q:\n%s", want, joined)
+		}
+	}
+}
+
+// The ip rule must go first: with a fail-closed policy still in table 100,
+// removing the tunnel ahead of the rule black-holes marked traffic for the rest
+// of the teardown, which is the opposite of what a rollback is for.
+func TestClear_RemovesTheRuleBeforeTheTunnel(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	if err := apply.Clear(r); err != nil {
+		t.Fatal(err)
+	}
+	rule, link := -1, -1
+	for i, c := range r.Calls {
+		if rule < 0 && strings.HasPrefix(c, "ip rule del priority") {
+			rule = i
+		}
+		if link < 0 && strings.HasPrefix(c, "ip link del dev wg-exit") {
+			link = i
+		}
+	}
+	if rule < 0 || link < 0 {
+		t.Fatalf("expected both a rule delete and a link delete: %v", r.Calls)
+	}
+	if rule > link {
+		t.Fatalf("the ip rule must be removed before the tunnel: %v", r.Calls)
+	}
+}
+
+// A box that was never set up, or was already torn down, must clear cleanly.
+func TestClear_AbsentObjectsAreNotFailures(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	// The real wording, which differs per tool -- a single invented message would
+	// not exercise the absence checks each one actually needs.
+	absent := map[string]string{
+		"ip rule del priority 100":    "RTNETLINK answers: No such file or directory",
+		"ip route flush table 100":    "RTNETLINK answers: No such file or directory",
+		"nft delete table inet gotun": "Error: No such file or directory",
+		"ip link del dev wg-exit":     `Cannot find device "wg-exit"`,
+		"ip link del dev wg-clients":  `Cannot find device "wg-clients"`,
+	}
+	for k, msg := range absent {
+		r.Errors[k] = errors.New(msg)
+	}
+	if err := apply.Clear(r); err != nil {
+		t.Fatalf("clearing an already-clean box must succeed: %v", err)
 	}
 }

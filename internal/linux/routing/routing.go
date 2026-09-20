@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -171,8 +172,28 @@ func addRoute(r linux.Runner, rt policy.RouteSpec) error {
 }
 
 // Clear removes owned rules and flushes the routing table.
+//
+// An object that is already gone is not a failure -- clear has to be safe to run
+// on a box that was never set up, or after a partial teardown -- but anything
+// else is reported, because this is the rollback path.
 func Clear(r linux.Runner, priority, table int) error {
-	_, _ = r.Run("ip", "rule", "del", "priority", fmt.Sprintf("%d", priority))
-	_, _ = r.Run("ip", "route", "flush", "table", fmt.Sprintf("%d", table))
-	return nil
+	var errs []error
+	if _, err := r.Run("ip", "rule", "del", "priority", fmt.Sprintf("%d", priority)); err != nil && !isAbsent(err) {
+		errs = append(errs, fmt.Errorf("ip rule del priority %d: %w", priority, err))
+	}
+	if _, err := r.Run("ip", "route", "flush", "table", fmt.Sprintf("%d", table)); err != nil && !isAbsent(err) {
+		errs = append(errs, fmt.Errorf("ip route flush table %d: %w", table, err))
+	}
+	return errors.Join(errs...)
+}
+
+// isAbsent reports whether an iproute2 error just means "it was not there".
+func isAbsent(err error) bool {
+	msg := err.Error()
+	for _, s := range []string{"No such file or directory", "does not exist", "Cannot find"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }

@@ -599,3 +599,32 @@ func TestSemanticEqual_MarkIngressScopeChangeDiffers(t *testing.T) {
 		t.Fatal("a different ingress scope must not compare equal")
 	}
 }
+
+// On the router the tunnel is created by netifd from a UCI section, and UCI
+// section names cannot contain hyphens -- so the device is "wgexit", not
+// "wg-exit". Routing to the default name there would point table 100 at a device
+// that does not exist.
+func TestCompile_TunnelInterfaceIsHonoured(t *testing.T) {
+	p := testPolicy(true)
+	p.TunnelInterface = "wgexit"
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, rt := range st.Routes {
+		if rt.Blackhole {
+			continue
+		}
+		if rt.Device != "wgexit" {
+			t.Fatalf("route points at %q, not the configured interface", rt.Device)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("expected a device route for the tunnel")
+	}
+	if st.WireGuard.Interface != "wgexit" {
+		t.Fatalf("WireGuard spec interface: %q", st.WireGuard.Interface)
+	}
+}

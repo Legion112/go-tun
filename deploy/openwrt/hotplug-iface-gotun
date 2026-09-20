@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Installed as /etc/hotplug.d/iface/99-gotun.
+#
+# Re-apply when the tunnel comes up. Boot order is the main reason: the init
+# script can run before netifd has created the device, and gotun's route step
+# needs it to exist. This also covers a tunnel bounce, after which the kernel has
+# withdrawn the device route from table 100 and only a reapply puts it back.
+#
+# apply is idempotent and reports zero changes when there is nothing to do, so
+# running it on every ifup of this interface is cheap.
+
+[ "$ACTION" = ifup ] || exit 0
+
+CONF=/etc/gotun/gotun.conf
+[ -f "$CONF" ] || exit 0
+# shellcheck source=/dev/null
+. "$CONF"
+
+[ "$INTERFACE" = "${GOTUN_TUNNEL_IFACE:-wgexit}" ] || exit 0
+
+logger -t gotun "reapplying policy after ifup of $INTERFACE"
+/etc/init.d/gotun start

@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -83,10 +84,21 @@ func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 }
 
 // Clear removes gotun-owned kernel objects.
+//
+// Every subsystem is attempted even when an earlier one fails, but failures are
+// reported rather than swallowed. This is the rollback path, so "exit 0" has to
+// mean something: previously it was returned unconditionally and was no evidence
+// at all that anything had been removed.
+//
+// The ip rule goes first. Nothing else matters until traffic has stopped being
+// steered into table 100, and tearing the tunnel down ahead of the rule would
+// black-hole marked traffic for the rest of the teardown under a fail-closed
+// policy -- the opposite of what a rollback is for.
 func Clear(r linux.Runner) error {
-	_ = wireguard.Clear(r, policy.DefaultTunnelIface)
-	_ = wireguard.Clear(r, policy.DefaultClientsIface)
-	_ = routing.Clear(r, policy.DefaultRulePriority, policy.DefaultTableID)
-	_ = nftables.Clear(r, policy.OwnedNftFamily, policy.OwnedNftTable)
-	return nil
+	return errors.Join(
+		routing.Clear(r, policy.DefaultRulePriority, policy.DefaultTableID),
+		nftables.Clear(r, policy.OwnedNftFamily, policy.OwnedNftTable),
+		wireguard.Clear(r, policy.DefaultTunnelIface),
+		wireguard.Clear(r, policy.DefaultClientsIface),
+	)
 }

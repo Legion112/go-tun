@@ -1,0 +1,29 @@
+# Sourced by /etc/init.d/gotun. Shell syntax, no export needed.
+
+# Collapsed CIDR list of destinations that go direct, out the ISP.
+GOTUN_PREFIXES=/etc/gotun/prefixes.txt
+
+# Underlay address of the WireGuard peer, excluded from marking so the tunnel
+# cannot try to carry its own handshake.
+GOTUN_ENDPOINT=185.80.130.211
+
+# The device netifd created. It is named after the UCI interface section, and
+# UCI section names cannot contain hyphens -- so "wgexit", not "wg-exit".
+GOTUN_TUNNEL_IFACE=wgexit
+
+# Local CIDRs, excluded from marking.
+GOTUN_LAN=192.168.8.0/24
+
+# Only classify traffic arriving on these interfaces. Leaving this empty
+# classifies traffic from ANY interface, including WAN-inbound. Add br-iot or a
+# guest bridge here the day it is enabled, or those clients silently get no
+# split routing at all.
+GOTUN_MARK_IFACE=br-lan
+
+# open: if the tunnel is unusable, marked traffic takes the uplink. Nothing
+# breaks, and nothing tells you either -- geo-blocked sites simply behave as if
+# you were back on the ISP, so check egress identity to detect it.
+# closed: blackhole it instead.
+GOTUN_FAIL_MODE=open
+
+GOTUN_TUNNEL_UP=true

@@ -68,6 +68,8 @@ type ApplyOptions struct {
 	DropIPv6        bool
 	MarkIfaceCSV    string
 	NonRoutableCSV  string
+	// TunnelIface overrides the routed interface name. Empty keeps the default.
+	TunnelIface string
 }
 
 // parsePrefixCSV parses a comma-separated CIDR list.
@@ -164,6 +166,10 @@ func Apply(o ApplyOptions) error {
 		FailMode:        o.FailMode,
 		DropIPv6:        o.DropIPv6,
 		MarkIIfNames:    splitCSV(o.MarkIfaceCSV),
+	}
+
+	if o.TunnelIface != "" {
+		p.TunnelInterface = o.TunnelIface
 	}
 
 	if nr := strings.TrimSpace(o.NonRoutableCSV); nr != "" {

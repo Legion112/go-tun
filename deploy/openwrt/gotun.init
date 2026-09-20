@@ -1,0 +1,46 @@
+#!/bin/sh /etc/rc.common
+#
+# gotun is a one-shot reconciler, not a daemon: it converges kernel state and
+# exits. So there is no process to supervise and USE_PROCD buys nothing -- this
+# is a boot-time apply plus a stop that tears the policy down.
+#
+# START is late on purpose. The apply installs a route through the tunnel device,
+# which netifd has to have created first. If it has not, the route step fails
+# while the nft table and the ip rule are already in place, which under the
+# default fail-open policy leaves table 100 empty and traffic on the uplink --
+# degraded, not broken. The hotplug hook then re-applies when the interface
+# actually comes up.
+
+START=99
+STOP=10
+
+CONF=/etc/gotun/gotun.conf
+
+start() {
+	if [ ! -f "$CONF" ]; then
+		echo "gotun: $CONF is missing; refusing to guess a policy" >&2
+		return 1
+	fi
+	# shellcheck source=/dev/null
+	. "$CONF"
+
+	if [ ! -f "$GOTUN_PREFIXES" ]; then
+		echo "gotun: prefix list $GOTUN_PREFIXES is missing; refusing to apply" >&2
+		return 1
+	fi
+
+	/usr/bin/gotun apply \
+		-prefixes "$GOTUN_PREFIXES" \
+		-endpoint "$GOTUN_ENDPOINT" \
+		-tunnel-iface "$GOTUN_TUNNEL_IFACE" \
+		-lan "$GOTUN_LAN" \
+		-mark-iface "$GOTUN_MARK_IFACE" \
+		-tunnel-up "${GOTUN_TUNNEL_UP:-true}" \
+		-fail-mode "${GOTUN_FAIL_MODE:-open}"
+}
+
+stop() {
+	# Removes the ip rule first, so nothing is steered into a table that is
+	# being torn down.
+	/usr/bin/gotun clear
+}
