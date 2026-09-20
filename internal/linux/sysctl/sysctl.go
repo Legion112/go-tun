@@ -8,25 +8,57 @@ import (
 	"github.com/legion/go-tun/internal/policy"
 )
 
-// Reconcile applies desired sysctls via the Runner (proc write, then sysctl fallback).
+// Reconcile applies desired sysctls. Returns the number of keys changed.
+//
+// Everything goes through the Runner rather than direct file I/O so that a dry
+// run can intercept it -- but nothing here may assume bash, which a router does
+// not have. With bash the read probe failed on every key, so convergence was
+// unreachable and every apply reported changes; worse, when a write also failed
+// the confirming read was another bash call, so it failed too and the error
+// aborted the whole apply before nft, wireguard and routing had run at all.
+//
+// /bin/sh and sysctl(8) are both present on every target, verified on the
+// gateway itself.
 func Reconcile(r linux.Runner, specs []policy.SysctlSpec) (int, error) {
 	changes := 0
 	for _, s := range specs {
-		proc := "/proc/sys/" + strings.ReplaceAll(s.Key, ".", "/")
-		cur, err := r.Run("bash", "-c", "cat "+proc+" 2>/dev/null || sysctl -n "+s.Key)
-		if err == nil && strings.TrimSpace(cur) == s.Value {
+		if cur, ok := readKey(r, s.Key); ok && cur == s.Value {
 			continue
 		}
-		if _, err := r.Run("bash", "-c", fmt.Sprintf("echo %s > %s", s.Value, proc)); err != nil {
-			if _, err2 := r.Run("sysctl", "-w", fmt.Sprintf("%s=%s", s.Key, s.Value)); err2 != nil {
-				out, rerr := r.Run("bash", "-c", "cat "+proc+" 2>/dev/null || true")
-				if rerr == nil && strings.TrimSpace(out) == s.Value {
-					continue
-				}
-				return changes, fmt.Errorf("%s: %v / %w", s.Key, err, err2)
+		if err := writeKey(r, s.Key, s.Value); err != nil {
+			// A write can report failure after taking effect, so only a readback
+			// settles it.
+			if cur, ok := readKey(r, s.Key); ok && cur == s.Value {
+				changes++
+				continue
 			}
+			return changes, fmt.Errorf("%s: %w", s.Key, err)
 		}
 		changes++
 	}
 	return changes, nil
+}
+
+func procPath(key string) string {
+	return "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
+}
+
+// readKey prefers the proc file, which is authoritative and needs no key parsing,
+// and falls back to sysctl(8) for a kernel without procfs mounted there.
+func readKey(r linux.Runner, key string) (string, bool) {
+	if out, err := r.Run("sh", "-c", "cat "+procPath(key)); err == nil {
+		return strings.TrimSpace(out), true
+	}
+	if out, err := r.Run("sysctl", "-n", key); err == nil {
+		return strings.TrimSpace(out), true
+	}
+	return "", false
+}
+
+func writeKey(r linux.Runner, key, value string) error {
+	if _, err := r.Run("sh", "-c", fmt.Sprintf("echo %s > %s", value, procPath(key))); err == nil {
+		return nil
+	}
+	_, err := r.Run("sysctl", "-w", key+"="+value)
+	return err
 }

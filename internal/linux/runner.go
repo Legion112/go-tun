@@ -100,7 +100,9 @@ func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string
 		if name == "nft" && len(args) >= 2 && args[0] == "list" {
 			return sampleNftList(), nil
 		}
-		if name == "bash" && len(args) >= 2 && args[0] == "-c" {
+		// Production shells out to sh, never bash (a router has no bash); accept
+		// both so an older caller is still simulated.
+		if (name == "sh" || name == "bash") && len(args) >= 2 && args[0] == "-c" {
 			cmd := args[1]
 			if strings.Contains(cmd, "cat /proc/sys/net/ipv4/ip_forward") ||
 				strings.Contains(cmd, "cat /proc/sys/net/ipv6/conf/all/disable_ipv6") ||

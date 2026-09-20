@@ -89,12 +89,19 @@ func tableRoutesMatch(out string, want []policy.RouteSpec) bool {
 	return true
 }
 
+// routeKey identifies a route by everything that changes where packets go.
+//
+// The nexthop is part of that, even though nothing gotun installs sets one: a
+// route left behind with a "via" would otherwise compare equal to the
+// device-scoped route that is wanted, so the wrong nexthop would be treated as
+// converged and never corrected. Desired routes have no gateway, so the key
+// carries an empty one and anything with a via reads as drift.
 func routeKey(rt policy.RouteSpec) string {
 	metric := rt.Metric
 	if rt.Blackhole {
 		return fmt.Sprintf("blackhole|default|metric=%d", metric)
 	}
-	return fmt.Sprintf("dev=%s|default|metric=%d", rt.Device, metric)
+	return fmt.Sprintf("dev=%s|via=|default|metric=%d", rt.Device, metric)
 }
 
 func parseRouteKeys(out string) map[string]struct{} {
@@ -127,17 +134,19 @@ func parseRouteLine(line string) (string, bool) {
 		// blackhole default [metric N]
 		return fmt.Sprintf("blackhole|default|metric=%d", metric), true
 	case fields[0] == "default":
-		dev := ""
+		dev, via := "", ""
 		for i := 0; i+1 < len(fields); i++ {
-			if fields[i] == "dev" {
+			switch fields[i] {
+			case "dev":
 				dev = fields[i+1]
-				break
+			case "via":
+				via = fields[i+1]
 			}
 		}
 		if dev == "" {
 			return "", false
 		}
-		return fmt.Sprintf("dev=%s|default|metric=%d", dev, metric), true
+		return fmt.Sprintf("dev=%s|via=%s|default|metric=%d", dev, via, metric), true
 	default:
 		return "", false
 	}
