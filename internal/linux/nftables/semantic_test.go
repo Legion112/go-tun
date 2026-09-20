@@ -279,3 +279,71 @@ func TestSemanticMatchJSON_DirectSNATAcceptsSnatToAddr(t *testing.T) {
 		t.Fatal("an explicit snat statement should satisfy the NAT requirement")
 	}
 }
+
+// nft renders a single address as a bare string with no prefix length. Dropping
+// such an element made the live set compare unequal to the desired one, so every
+// apply deleted and rebuilt the whole table -- reloading the entire prefix set
+// and resetting the counters that live verification depends on.
+func TestElemToCIDR_BareAddressGetsHostPrefix(t *testing.T) {
+	got, ok := elemToCIDR([]byte(`"2.16.10.221"`))
+	if !ok {
+		t.Fatal("a bare address must be accepted, not dropped")
+	}
+	if got != "2.16.10.221/32" {
+		t.Fatalf("got %q, want 2.16.10.221/32", got)
+	}
+}
+
+func TestElemToCIDR_BareIPv6AddressGetsHostPrefix(t *testing.T) {
+	got, ok := elemToCIDR([]byte(`"2001:db8::1"`))
+	if !ok {
+		t.Fatal("a bare v6 address must be accepted")
+	}
+	if got != "2001:db8::1/128" {
+		t.Fatalf("got %q, want 2001:db8::1/128", got)
+	}
+}
+
+func TestElemToCIDR_CIDRStringUnchanged(t *testing.T) {
+	got, ok := elemToCIDR([]byte(`"10.0.0.0/24"`))
+	if !ok || got != "10.0.0.0/24" {
+		t.Fatalf("got %q ok=%v", got, ok)
+	}
+}
+
+func TestElemToCIDR_PrefixObject(t *testing.T) {
+	got, ok := elemToCIDR([]byte(`{"prefix":{"addr":"10.0.0.0","len":24}}`))
+	if !ok || got != "10.0.0.0/24" {
+		t.Fatalf("got %q ok=%v", got, ok)
+	}
+}
+
+// A non-address string must still be rejected rather than turned into garbage.
+func TestElemToCIDR_NonAddressStringRejected(t *testing.T) {
+	if got, ok := elemToCIDR([]byte(`"local"`)); ok {
+		t.Fatalf("expected rejection, got %q", got)
+	}
+}
+
+// The regression as it actually appeared: a set mixing prefixes and bare hosts
+// must compare equal to the spec that produced it.
+func TestSemanticMatchJSON_SetWithBareHostElements(t *testing.T) {
+	spec := policy.NftSpec{
+		Family: "inet", Table: "gotun",
+		Sets: []policy.NftSetSpec{{
+			Name: "ru_nets", Type: "ipv4_addr",
+			Elements: []netip.Prefix{
+				netip.MustParsePrefix("10.200.0.0/24"),
+				netip.MustParsePrefix("2.16.10.221/32"),
+				netip.MustParsePrefix("5.178.2.128/32"),
+			},
+		}},
+	}
+	// nft returns the /32s bare, exactly as observed on a live gateway.
+	live := `{"nftables":[
+{"set":{"name":"ru_nets","elem":[{"prefix":{"addr":"10.200.0.0","len":24}},"2.16.10.221","5.178.2.128"]}}
+]}`
+	if !semanticMatchJSON(live, spec) {
+		t.Fatal("a set containing bare host addresses must match; otherwise every apply rebuilds the table")
+	}
+}

@@ -3,6 +3,7 @@ package nftables
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -293,8 +294,18 @@ func parseSetJSON(raw json.RawMessage) (string, map[string]struct{}) {
 
 func elemToCIDR(raw json.RawMessage) (string, bool) {
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil && strings.Contains(s, "/") {
-		return s, true
+	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+		if strings.Contains(s, "/") {
+			return s, true
+		}
+		// nft renders a single address as a bare string, with no prefix length.
+		// The desired side always carries one (netip.Prefix.String()), so
+		// normalise or the element is dropped and the set compares unequal --
+		// which makes every apply delete and rebuild the whole table.
+		if a, err := netip.ParseAddr(s); err == nil {
+			return netip.PrefixFrom(a, a.BitLen()).String(), true
+		}
+		return "", false
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {

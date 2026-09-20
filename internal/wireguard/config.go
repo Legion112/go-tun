@@ -101,9 +101,22 @@ func ensureAllowedIPRoutes(r linux.Runner, iface string, allowed []netip.Prefix)
 	// Ensure AllowedIPs appear as routes (some environments suppress WG auto-routes).
 	// Skip default routes: policy routing (fwmark → table 100) owns the default via
 	// the tunnel; installing 0.0.0.0/0 or ::/0 into main hijacks underlay/endpoint traffic.
+	//
+	// Read first, and only count a route that was actually missing. The check has
+	// to keep running even when the peer config matches semantically, because a
+	// bounce can drop these routes -- but reporting a change for a route that was
+	// already correct makes every apply look non-convergent and hides real drift.
 	changes := 0
+	var existing string
 	for _, p := range allowed {
 		if !p.IsValid() || isDefaultRoute(p) {
+			continue
+		}
+		if existing == "" {
+			// Lazily, so a peer with only default AllowedIPs costs nothing.
+			existing, _ = r.Run("ip", "route", "show", "dev", iface)
+		}
+		if routeExists(existing, p) {
 			continue
 		}
 		if _, err := r.Run("ip", "route", "replace", p.String(), "dev", iface); err != nil {
@@ -112,6 +125,44 @@ func ensureAllowedIPRoutes(r linux.Runner, iface string, allowed []netip.Prefix)
 		changes++
 	}
 	return changes, nil
+}
+
+// routeExists reports whether `ip route show dev X` output already carries a
+// route for p.
+//
+// The destination is compared as a parsed prefix, not as a string: iproute2
+// prints a host route without its prefix length ("10.0.0.5" for 10.0.0.5/32),
+// so a textual match would miss it.
+func routeExists(routeShowOutput string, p netip.Prefix) bool {
+	want := p.Masked()
+	for _, line := range strings.Split(routeShowOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		got, ok := parseRouteDest(fields[0])
+		if ok && got == want {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRouteDest parses the destination field of an `ip route show` line, which
+// is either a CIDR, a bare address (a host route), or the word "default".
+func parseRouteDest(field string) (netip.Prefix, bool) {
+	if strings.Contains(field, "/") {
+		pfx, err := netip.ParsePrefix(field)
+		if err != nil {
+			return netip.Prefix{}, false
+		}
+		return pfx.Masked(), true
+	}
+	addr, err := netip.ParseAddr(field)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), true
 }
 
 func isDefaultRoute(p netip.Prefix) bool {
