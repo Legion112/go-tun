@@ -40,29 +40,39 @@ the ip rule and nft table are gone too (they are kernel state, not files), so
 traffic quietly reverts to going out the ISP for everything. Nothing breaks, which
 is exactly why it is easy to miss.
 
-## Known blocker on GL.iNet Flint 2 (MT7986, OpenWrt 21.02)
+## Known blocker: new WireGuard sessions do not survive on this path
 
-**This router cannot terminate the tunnel itself.** Locally-originated UDP is
-dropped on WAN egress, while locally-originated ICMP and TCP egress normally and
-forwarded/NATed UDP egresses normally. Measured at both ends:
+Not a router problem, and **not fixable by changing firmware**. A brand-new plain
+WireGuard session to the exit VPS completes its first handshake and then dies: rx
+freezes at the handshake response, tx keeps climbing, no later handshake ever
+completes, and the session expires after ~180 s. It reproduces identically from
+two different boxes -- the OpenWrt router and the x86 Linux box behind it -- so it
+does not depend on which host originates it.
 
-| from Flint's own stack, to the VPS | result |
-|---|---|
-| ICMP | arrives |
-| TCP 22 | arrives, full handshake and SSH banner |
-| UDP (any port) | never arrives |
-| UDP, but *forwarded* from a LAN host through Flint's NAT | arrives |
+Meanwhile a plain WireGuard tunnel established months earlier to the *same* VPS IP
+and port carries hundreds of megabytes without trouble. New sessions die;
+established ones live. On this path that points at DPI on WireGuard session
+setup rather than at any host, which matches how Russian ISPs are known to behave.
 
-The last two rows are indistinguishable on the wire — same source IP after
-masquerade, same protocol, same destination, both new flows — so it is not the
-ISP and not DPI. Flint's own UDP also works fine out `br-lan`, so it is specific
-to the WAN path. nft counters in the `postrouting` hook confirm the packets get
-that far, so the loss is below netfilter, in the driver or hardware path.
+Ruled out, each with a measurement rather than a guess: MTU, MASQUERADE, conntrack
+capacity, NIC errors, TX checksum offload, the MediaTek PPE hook, the VPS firewall
+and peer config, and the router's own UDP egress. nft counters in the `output` and
+`postrouting` hooks confirm the packets leave the router; per-peer counters on both
+ends show where they stop.
 
-The consequence is not specific to WireGuard: any UDP-based tunnel originating on
-this router will fail. gotun's classifier itself works perfectly here — marking,
-the mark-to-table lookup, and RU-direct were all verified — so the workable shapes
-are to keep tunnel termination on a separate box, or to fix/replace the firmware.
+Two traps to avoid when re-testing this:
+
+- `nslookup` is a poor UDP probe here. It uses port 53, and foreign resolvers are
+  blocked separately by the same ISP, so a failure says nothing about UDP in
+  general. A probe to a Russian resolver succeeds and proves the router's own UDP
+  egress is fine.
+- This busybox `nc` is the minimal build. It silently ignores `-u` and `-p`, so
+  UDP probes built on it never send anything and read as total packet loss.
+
+The practical route forward is an obfuscated transport rather than plain
+WireGuard; the exit VPS already runs AmneziaWG alongside it. Note the operational
+risk this implies for the existing tunnel: it works because it is established, so
+if it ever drops it may not come back.
 
 ## Rollback
 
