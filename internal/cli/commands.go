@@ -54,7 +54,7 @@ func ExportAmnezia(license, country, out, mmdbPath, format string) error {
 }
 
 // Apply loads prefixes and reconciles kernel state.
-func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tunnelUp bool) error {
+func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tunnelUp, directSNAT bool) error {
 	if prefixesPath == "" {
 		return fmt.Errorf("-prefixes is required")
 	}
@@ -100,6 +100,9 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 	if err != nil {
 		return err
 	}
+	if directSNAT && len(lanIfaces) == 0 {
+		fmt.Fprintln(os.Stderr, "gotun apply: -direct-snat requested but no interface matched -lan; direct traffic will NOT be masqueraded")
+	}
 
 	p := policy.Policy{
 		DirectPrefixes:  prefs,
@@ -112,6 +115,7 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 		RulePriority:    policy.DefaultRulePriority,
 		FailMode:        policy.FailClosed,
 		TunnelUp:        tunnelUp,
+		DirectSNAT:      directSNAT,
 	}
 
 	if wgConfig != "" {

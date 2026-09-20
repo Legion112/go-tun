@@ -186,6 +186,9 @@ func runVerify(args []string, w io.Writer) error {
 	wantFgn := fs.String("expect-foreign-egress", "", "public IP foreign traffic must appear from (the exit hop)")
 	largeURL := fs.String("large-url", DefaultLargeURL, "large object fetched to catch an MTU/MSS black hole (\"\" to skip)")
 	largeBytes := fs.Int64("large-bytes", DefaultLargeBytes, "expected size of -large-url")
+	directURL := fs.String("large-direct-url", DefaultDirectURL, "RU-hosted object fetched to measure the DIRECT class (\"\" to skip)")
+	directIP := fs.String("large-direct-ip", "", "pin -large-direct-url to this IP (recommended; must be inside ru_nets)")
+	minDirect := fs.Int64("min-direct-speed", DefaultMinDirectSpeed, "fail if the direct class is slower than this many B/s")
 	dnsNames := fs.String("dns-names", "yandex.ru,example.com", "comma-separated names to resolve")
 	skipEgress := fs.Bool("skip-egress", false, "skip the egress-identity checks")
 	timeout := fs.Duration("timeout", 25*time.Second, "per-request timeout")
@@ -212,8 +215,11 @@ func runVerify(args []string, w io.Writer) error {
 		ExpectFgnEgres: strings.TrimSpace(*wantFgn),
 		LargeURL:       *largeURL,
 		LargeBytes:     *largeBytes,
+		DirectURL:      *directURL,
+		MinDirectSpeed: *minDirect,
 		SkipEgress:     *skipEgress,
 		SkipLarge:      *largeURL == "",
+		SkipDirect:     *directURL == "",
 		Timeout:        *timeout,
 	}
 	if *ruIP != "" {
@@ -223,6 +229,11 @@ func runVerify(args []string, w io.Writer) error {
 	}
 	if *fgnIP != "" {
 		if o.ForeignIP, err = parseAddrFlag("foreign-ip", *fgnIP); err != nil {
+			return err
+		}
+	}
+	if *directIP != "" {
+		if o.DirectIP, err = parseAddrFlag("large-direct-ip", *directIP); err != nil {
 			return err
 		}
 	}

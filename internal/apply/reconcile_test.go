@@ -131,3 +131,47 @@ func TestCompileIncludesEndpointInNftScript(t *testing.T) {
 		t.Fatal("expected nft -f with stdin script")
 	}
 }
+
+func directSNATPolicy() policy.Policy {
+	p := basePolicy()
+	p.DirectSNAT = true
+	// Must match the interface name in linux.RecordingRunner's sampleNftListJSON
+	// fixture, or the semantic match fails and this reports a spurious change.
+	p.LANIfaces = []string{"eth0"}
+	return p
+}
+
+func TestReconcile_DirectSNATSecondApplySemanticNoop(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.AlreadyApplied = true
+	res, err := apply.Reconcile(r, directSNATPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Changes != 0 {
+		t.Fatalf("expected 0 semantic changes on second apply with direct SNAT, got %d; calls=%v",
+			res.Changes, r.Calls)
+	}
+}
+
+func TestReconcile_DirectSNATInSingleTransaction(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	if _, err := apply.Reconcile(r, directSNATPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.Calls, "\n")
+	var stdin string
+	for _, c := range r.Calls {
+		if strings.HasPrefix(c, "STDIN:") && strings.Contains(c, "add table inet gotun") {
+			stdin = c
+		}
+	}
+	if stdin == "" {
+		t.Fatalf("no nft batch found in:\n%s", joined)
+	}
+	for _, want := range []string{"add chain inet gotun postrouting", "masquerade", "snat-skip-lan"} {
+		if !strings.Contains(stdin, want) {
+			t.Fatalf("nft batch missing %q:\n%s", want, stdin)
+		}
+	}
+}

@@ -23,6 +23,9 @@ const (
 	RuNetsSetName              = "ru_nets"
 	HomeNetsSetName            = "home_nets"
 
+	// SrcNatPriority is nft's "srcnat" hook priority, where source NAT belongs.
+	SrcNatPriority = 100
+
 	// TunnelRouteMetric is preferred while wg-exit is usable.
 	TunnelRouteMetric = 10
 	// FailClosedRouteMetric is the permanent terminal fallback in table 100.
@@ -55,6 +58,18 @@ type Policy struct {
 	// InboundWireGuard is the clients-facing listen interface (WAN peers via port-forward).
 	// When set (PrivateKey non-empty), compile installs home_nets forward isolation.
 	InboundWireGuard WireGuardConfig
+	// DirectSNAT masquerades the direct class as it leaves LANIfaces.
+	//
+	// Required whenever clients reach the gateway over the same L2 segment the
+	// gateway uses as its own uplink. Direct-class traffic then hairpins: in and
+	// out the same interface, keeping the client's source address, with the reply
+	// returning from the upstream router straight to the client. Some routers
+	// handle that badly -- a MediaTek hardware flow-offload engine was measured
+	// destroying such flows (~700x throughput loss, heavy TCP retransmission,
+	// while ICMP stayed pristine because it is not offloaded). Masquerading makes
+	// the flow ordinary and symmetric from the router's point of view, exactly as
+	// the tunnel class already appears.
+	DirectSNAT bool
 }
 
 // WireGuardConfig is declarative WG desired state attached to Policy.
@@ -119,7 +134,9 @@ type NftChainSpec struct {
 type NftRuleSpec struct {
 	// Description is a stable id for semantic comparison.
 	Description string
-	// MatchExcludes: if dst is in any of these prefixes or equals Endpoint, skip mark.
+	// ExcludePrefixes/ExcludeAddrs: if dst is in any of these prefixes or equals
+	// one of these addrs, return before this rule's action -- skipping the mark
+	// in prerouting, or skipping SNAT in postrouting.
 	ExcludePrefixes []netip.Prefix
 	ExcludeAddrs    []netip.Addr
 	// DirectSet: if dst is in this set, do not mark (go direct).
@@ -131,6 +148,10 @@ type NftRuleSpec struct {
 	// IIfName + DropDstSet: drop forwarded packets from iface to destinations in set.
 	IIfName    string
 	DropDstSet string
+	// OIfNames: output interfaces this rule applies to; one nft rule per entry.
+	OIfNames []string
+	// SNATMasquerade emits a masquerade statement.
+	SNATMasquerade bool
 }
 
 // IPRuleSpec is a policy routing rule owned by gotun.

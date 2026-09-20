@@ -136,6 +136,11 @@ func sampleNftList() string {
     ip daddr 10.10.0.2 return comment "exclude-endpoint"
     ip daddr != @ru_nets meta mark set 0x1 comment "mark-non-direct"
   }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip daddr 10.10.0.0/24 return comment "snat-skip-lan"
+    meta nfproto ipv4 oifname "eth0" fib saddr type != local counter packets 0 bytes 0 masquerade comment "snat-direct"
+  }
 }`
 }
 
@@ -148,7 +153,10 @@ func sampleNftListJSON() string {
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"drop-ipv6","expr":[]}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-endpoint","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"10.10.0.2"}}]}},
-{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}}
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}},
+{"chain":{"family":"inet","table":"gotun","name":"postrouting","type":"nat","hook":"postrouting","prio":100,"policy":"accept"}},
+{"rule":{"family":"inet","table":"gotun","chain":"postrouting","comment":"snat-skip-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
+{"rule":{"family":"inet","table":"gotun","chain":"postrouting","comment":"snat-direct","expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"eth0"}},{"match":{"op":"!=","left":{"fib":{"result":"type","flags":["saddr"]}},"right":"local"}},{"counter":{"packets":0,"bytes":0}},{"masquerade":null}]}}
 ]}`
 }
 

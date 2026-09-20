@@ -23,7 +23,7 @@ Control flow:
 2. Compile to declarative `DesiredKernelState` (no shell-op ordering in the model).
 3. Reconcile owned Linux objects: sysctl → nftables → WireGuard → ip rules/routes.
 
-Gotun does **not** masquerade by default; the exit peer should accept the client LAN via WireGuard AllowedIPs (and may SNAT toward foreign destinations).
+Gotun does **not** masquerade the **tunnel** class; the exit peer should accept the client LAN via WireGuard AllowedIPs and SNAT toward foreign destinations (see "Gateway-side requirement"). The **direct** class is masqueraded onto the LAN only with `-direct-snat`, which is required whenever clients reach the gateway over the same L2 segment the gateway uses as its own uplink — see "Direct-class SNAT".
 
 ## Why MaxMind Country prefixes
 
@@ -241,6 +241,59 @@ nmcli connection modify <con> ipv4.never-default yes \
 **Protected LAN set** = every IPv4 prefix on an UP non-loopback interface, plus each repeatable `-lan CIDR`. A multi-homed host keeps *all* of its prefixes on-link; two hosts per prefix are probed, because a stale per-destination route exception can make a single probe read on-link when the prefix is not.
 
 **Gateway-side requirement.** The exit peer's `AllowedIPs` must include every client LAN that will source traffic through the tunnel, **and** that LAN must be source-NATed on the way out. `AllowedIPs` alone only gets the packet accepted and routed: without SNAT it leaves the exit host with an RFC1918 source, is dropped upstream, and no reply is ever generated — while `wg show` counters still climb and the tunnel looks healthy. Symptom: connections hang rather than fail.
+
+## Direct-class SNAT (`-direct-snat`)
+
+When clients point their default route at a gateway that sits on the **same L2 segment** as its own
+uplink, direct-class traffic hairpins: in and out the same interface, keeping the client's source
+address, with the reply returning from the upstream router straight to the client. The path is
+asymmetric, and some routers handle it badly.
+
+Measured on a GL.iNet GL-MT6000 (MediaTek MT7986, hardware flow offload active):
+
+| path | throughput |
+|---|---|
+| tunnel class (`wg-exit`) | 16.2 MB/s |
+| direct class, from a client | **5.0 KB/s**, 14–23% TCP retransmission, ~28 s RTO stalls |
+| direct class, from the gateway itself | 2.27 MB/s |
+| direct class, from a client, router offload disabled | **1.7–1.9 MB/s**, 0 retransmits |
+
+A 450× loss, attributed by A/B/A toggling of `/sys/kernel/debug/hnat/hook_toggle`. Note that **ICMP is
+unaffected** — 0% loss even at 1472-byte payloads — because the offload engine accelerates TCP/UDP and
+not ICMP. Latency checks therefore look perfect while TCP dies.
+
+`-direct-snat` masquerades the direct class as it leaves the LAN interfaces, so the upstream router
+sees an ordinary symmetric flow sourced from the gateway, exactly as it already sees the tunnel class:
+
+```
+chain postrouting {
+  type nat hook postrouting priority srcnat; policy accept;
+  ip daddr 192.168.8.0/24 return comment "snat-skip-lan"
+  meta nfproto ipv4 oifname "enp1s0" fib saddr type != local counter masquerade comment "snat-direct"
+}
+```
+
+Two guards matter. `fib saddr type != local` excludes WireGuard's own encapsulated packets, which are
+locally generated but still leave via a LAN interface — masquerading those can remap the source port and
+make the peer see a roaming endpoint. A mark match cannot substitute, because encap packets never
+traverse prerouting and so carry mark 0 exactly like the direct class. `ip daddr <LAN> return` keeps
+traffic the gateway forwards between two LAN hosts unmodified.
+
+**Trade-offs.**
+
+- Per-client visibility on the upstream router is lost for the direct class: every direct flow appears to
+  come from the gateway, so router-side per-client rules, accounting and QoS stop matching.
+- Creating a `nat` base chain enables conntrack for the whole netns, adding a per-packet lookup to the
+  tunnel class too. Compare `nf_conntrack_count` before and after.
+- Direct replies now traverse the gateway, so expect direct throughput near the gateway's own direct rate
+  rather than the tunnel's.
+- `gotun clear` does **not** flush conntrack, and established TCP entries live 5 days by default.
+  Turning it off requires `conntrack -F` (or a targeted `conntrack -D`), or existing flows stay
+  masqueraded for days.
+- Scope is the interfaces discovered from `-lan`. Note `-lan` now serves three purposes: excluding
+  destinations from marking, the `home_nets` isolation set, and the SNAT skip list.
+
+Off by default. Enable with `-direct-snat true`.
 
 ## Out of scope (v1)
 

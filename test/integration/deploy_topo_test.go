@@ -202,16 +202,13 @@ AllowedIPs = 10.98.0.2/32
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-wg-clients-config", "/tmp/wg-clients.conf",
 		"-tunnel-up", "true",
+		// Masquerade the direct class onto the Pi LAN so the home-router sees a
+		// LAN-sourced flow. This used to be a hand-rolled nft rule in this test;
+		// gotun owns it now, so the RU-egress assertion below only passes if
+		// gotun's own rule fires -- the home-router has no route back to
+		// 10.98.0.0/30.
+		"-direct-snat", "true",
 	))
-	// SNAT client WG traffic onto Pi LAN so the home-router sees a LAN-sourced flow (real gateway behavior).
-	must(t, lab.ExecOK(ctx, "pi", "bash", "-c", `
-set -e
-LAN_IF=$(ip -o -4 addr show | awk '/10\.56\.0\.3\//{print $2; exit}' | cut -d@ -f1)
-test -n "$LAN_IF"
-nft add table ip nat 2>/dev/null || true
-nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }' 2>/dev/null || true
-nft add rule ip nat postrouting oifname "$LAN_IF" masquerade
-`))
 
 	// Pi LAN probe for port-forward / direct-LAN negatives
 	must(t, lab.ExecOK(ctx, "pi", "bash", "-c",
@@ -278,6 +275,25 @@ ip route replace 10.55.0.0/24 dev wg-clients
 	if strings.TrimSpace(ruPeer) == deployRemoteHop {
 		t.Fatal("RU destination must not see remote-hop")
 	}
+	// gotun's own snat-direct rule is what made the assertion above possible:
+	// the client's WG source is 10.98.0.2 and the home-router has no route back
+	// to it, so an un-masqueraded flow could never have completed.
+	snatOut, err := lab.Exec(ctx, "pi", "nft", "list", "chain", "inet", "gotun", "postrouting")
+	if err != nil {
+		t.Fatalf("nft list postrouting: %v", err)
+	}
+	if !nftCounterHit(snatOut, "snat-direct", "") {
+		t.Fatalf("snat-direct counter must increase for forwarded direct traffic; nft:\n%s", snatOut)
+	}
+	// Traffic toward the Pi's own LAN must NOT be masqueraded, or LAN hosts would
+	// see the gateway instead of the client.
+	pilanPeer, err := lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.56.0.3:18080/")
+	if err == nil && strings.Contains(pilanPeer, "PILAN") {
+		lanNft, lerr := lab.Exec(ctx, "pi", "nft", "list", "chain", "inet", "gotun", "postrouting")
+		if lerr == nil && !strings.Contains(lanNft, `comment "snat-skip-lan"`) {
+			t.Fatal("expected a snat-skip-lan guard so LAN-destined traffic keeps the client source")
+		}
+	}
 
 	// 4: non-RU via gotun appears from remote-hop
 	frID, err := lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://"+deployNonRU+":8080/id")
@@ -328,13 +344,18 @@ ip route replace 10.56.0.0/24 dev wg-clients
 }
 
 func excludeEndpointCounterHit(nftList, endpointIP string) bool {
-	// Look for the exclude-endpoint rule mentioning the endpoint and a non-zero packet counter.
+	return nftCounterHit(nftList, "exclude-endpoint", endpointIP)
+}
+
+// nftCounterHit reports whether a rule carrying the given comment (and, when
+// mustContain is non-empty, that substring) has a non-zero packet counter.
+func nftCounterHit(nftList, comment, mustContain string) bool {
 	lines := strings.Split(nftList, "\n")
 	for _, line := range lines {
-		if !strings.Contains(line, `comment "exclude-endpoint"`) && !strings.Contains(line, "exclude-endpoint") {
+		if !strings.Contains(line, comment) {
 			continue
 		}
-		if !strings.Contains(line, endpointIP) {
+		if mustContain != "" && !strings.Contains(line, mustContain) {
 			continue
 		}
 		// e.g. counter packets 2 bytes 168

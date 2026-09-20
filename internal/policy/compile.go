@@ -93,6 +93,39 @@ func Compile(p Policy) (DesiredKernelState, error) {
 		})
 	}
 
+	// Masquerade the direct class on the way out, when asked.
+	//
+	// The tunnel class egresses wg-exit, so matching on the LAN output
+	// interfaces already selects only direct-class traffic. Two guards matter:
+	//
+	//   fib saddr type != local  -- WireGuard's own encapsulated packets are
+	//     locally generated, carry the gateway's LAN address and leave via a LAN
+	//     interface, so they match oifname too. Masquerading them can remap the
+	//     source port and make the peer see a roaming endpoint. A mark match
+	//     cannot substitute: encap packets never traverse prerouting, so they
+	//     carry mark 0 exactly like the direct class.
+	//
+	//   ip daddr <LAN> return   -- traffic the gateway forwards between two LAN
+	//     hosts also arrives and leaves on a LAN interface. It never transits the
+	//     upstream router and must keep the client's source address.
+	if p.DirectSNAT && len(p.LANIfaces) > 0 {
+		chains = append(chains, NftChainSpec{
+			Name:     "postrouting",
+			Type:     "nat",
+			Hook:     "postrouting",
+			Priority: SrcNatPriority,
+			Policy:   "accept",
+			Rules: []NftRuleSpec{
+				{
+					Description:     "snat-direct",
+					OIfNames:        slices.Clone(p.LANIfaces),
+					ExcludePrefixes: append([]netip.Prefix(nil), p.LANs...),
+					SNATMasquerade:  true,
+				},
+			},
+		})
+	}
+
 	// A policy-routing gateway must not emit ICMP redirects. When a client
 	// sends direct-destined traffic here, the next hop is on the same interface
 	// the packet arrived on, so the kernel would tell the client "go to the ISP
@@ -252,7 +285,10 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 				DropIPv6:        rule.DropIPv6,
 				IIfName:         rule.IIfName,
 				DropDstSet:      rule.DropDstSet,
+				OIfNames:        slices.Clone(rule.OIfNames),
+				SNATMasquerade:  rule.SNATMasquerade,
 			}
+			sort.Strings(rules[j].OIfNames)
 			sort.Slice(rules[j].ExcludePrefixes, func(a, b int) bool {
 				return rules[j].ExcludePrefixes[a].String() < rules[j].ExcludePrefixes[b].String()
 			})

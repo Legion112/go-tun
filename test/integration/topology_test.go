@@ -373,3 +373,62 @@ func genWGKeys(t *testing.T, lab *harness.Lab, name string) (priv, pub string) {
 	}
 	return priv, strings.TrimSpace(pub)
 }
+
+// TestDirectSNAT_NoExtraChurnWithRealNft guards against the reconciler being too
+// strict about its own SNAT rule. If the live-JSON matcher disagreed with what
+// real nft emits, every apply would delete and rebuild the whole table, reloading
+// the entire prefix set and resetting the counters live verification relies on.
+//
+// It measures the change count with and without -direct-snat and requires them to
+// be equal, rather than asserting an absolute zero: a separate, pre-existing
+// idempotency defect already makes a converged apply report a non-zero count
+// (see TestIdempotentApply), and this test must isolate the SNAT rule from it.
+func TestDirectSNAT_NoExtraChurnWithRealNft(t *testing.T) {
+	tp := setupTopo(t)
+	ctx := context.Background()
+
+	base := []string{"gotun", "apply",
+		"-prefixes", "/tmp/ru.txt",
+		"-endpoint", "10.20.0.3",
+		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
+		"-wg-config", "/tmp/wg-exit.conf",
+		"-tunnel-up", "true",
+	}
+	withSNAT := append(append([]string{}, base...), "-direct-snat", "true")
+
+	converged := func(args []string) string {
+		t.Helper()
+		if _, err := tp.lab.Exec(ctx, "gotun", args...); err != nil {
+			t.Fatalf("apply %v: %v", args, err)
+		}
+		out, err := tp.lab.Exec(ctx, "gotun", args...)
+		if err != nil {
+			t.Fatalf("re-apply %v: %v", args, err)
+		}
+		return strings.TrimSpace(out)
+	}
+
+	baseline := converged(base)
+	snat := converged(withSNAT)
+	if baseline != snat {
+		t.Fatalf("direct SNAT changed the converged apply result:\n  without: %q\n  with:    %q\n"+
+			"a difference here means the SNAT rule is not recognised in live nft JSON, so every apply rebuilds the table",
+			baseline, snat)
+	}
+
+	// The rule is actually installed and carries a masquerade.
+	nftOut, err := tp.lab.Exec(ctx, "gotun", "nft", "list", "chain", "inet", "gotun", "postrouting")
+	if err != nil {
+		t.Fatalf("nft list postrouting: %v", err)
+	}
+	for _, want := range []string{"masquerade", `comment "snat-direct"`, `comment "snat-skip-lan"`} {
+		if !strings.Contains(nftOut, want) {
+			t.Fatalf("postrouting chain missing %q:\n%s", want, nftOut)
+		}
+	}
+	// RU traffic still works through the masquerade.
+	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
+	if err != nil || strings.TrimSpace(ru) != "RU" {
+		t.Fatalf("RU through direct SNAT: %v %q", err, ru)
+	}
+}

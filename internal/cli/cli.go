@@ -58,12 +58,19 @@ func runApply(args []string) error {
 	wgConf := fs.String("wg-config", "", "optional path to wg-quick style config (exit hop)")
 	wgClients := fs.String("wg-clients-config", "", "optional path to wg-quick style config (inbound clients iface)")
 	tunnelUp := fs.String("tunnel-up", "true", "whether tunnel should carry traffic (true|false)")
-	lan := fs.String("lan", "", "LAN CIDR to exclude from marking and for home isolation (comma-separated)")
+	lan := fs.String("lan", "", "LAN CIDR to exclude from marking, for home isolation, and to skip SNAT (comma-separated)")
+	directSNAT := fs.String("direct-snat", "false", "masquerade direct-class traffic out the LAN interface(s) (true|false)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	up := strings.EqualFold(*tunnelUp, "true") || *tunnelUp == "1"
-	return Apply(*prefixesPath, *endpoint, *wgConf, *wgClients, *lan, up)
+	return Apply(*prefixesPath, *endpoint, *wgConf, *wgClients, *lan, truthy(*tunnelUp), truthy(*directSNAT))
+}
+
+// truthy parses the string-valued booleans this CLI uses. They are strings
+// rather than fs.Bool because Go's flag package rejects the "-flag value" form
+// for bool flags, and the integration labs invoke gotun that way.
+func truthy(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), "true") || strings.TrimSpace(s) == "1"
 }
 
 func runClear(args []string) error {

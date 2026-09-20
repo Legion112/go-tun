@@ -177,3 +177,105 @@ func TestSemanticMatchJSON_IsolateHome(t *testing.T) {
 		t.Fatal("wrong home_nets elements must not match")
 	}
 }
+
+func snatMatchSpec(lan string, oifs ...string) policy.NftSpec {
+	return policy.NftSpec{
+		Family: "inet", Table: "gotun",
+		Chains: []policy.NftChainSpec{{
+			Name: "postrouting", Type: "nat", Hook: "postrouting",
+			Priority: policy.SrcNatPriority, Policy: "accept",
+			Rules: []policy.NftRuleSpec{{
+				Description:     "snat-direct",
+				OIfNames:        oifs,
+				ExcludePrefixes: []netip.Prefix{netip.MustParsePrefix(lan)},
+				SNATMasquerade:  true,
+			}},
+		}},
+	}
+}
+
+// snatRuleJSON builds one live snat-direct rule. natStmt is injected verbatim so
+// a test can omit it entirely.
+func snatRuleJSON(oif, natStmt string) string {
+	return fmt.Sprintf(`{"rule":{"chain":"postrouting","comment":"snat-direct","expr":[`+
+		`{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"%s"}},`+
+		`{"match":{"op":"!=","left":{"fib":{"result":"type","flags":["saddr"]}},"right":"local"}},`+
+		`{"counter":{"packets":0,"bytes":0}}%s]}}`, oif, natStmt)
+}
+
+func nftJSONWithSNAT(lan string, natStmt string, oifs ...string) string {
+	p := netip.MustParsePrefix(lan)
+	out := `{"nftables":[
+{"chain":{"name":"postrouting","type":"nat","hook":"postrouting","prio":100,"policy":"accept"}},
+` + fmt.Sprintf(`{"rule":{"chain":"postrouting","comment":"snat-skip-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"%s","len":%d}}}}]}}`,
+		p.Addr().String(), p.Bits())
+	for _, o := range oifs {
+		out += ",\n" + snatRuleJSON(o, natStmt)
+	}
+	return out + "\n]}"
+}
+
+// A bare masquerade serialises as {"masquerade": null}. This is the single most
+// likely place for a hand-written fixture to diverge from real nft output.
+func TestSemanticMatchJSON_DirectSNATMasqueradeNullValue(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	good := nftJSONWithSNAT("192.168.8.0/24", `,{"masquerade":null}`, "enp1s0")
+	if !semanticMatchJSON(good, spec) {
+		t.Fatalf("expected match for a null-valued masquerade statement:\n%s", good)
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNAT(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	if !semanticMatchJSON(nftJSONWithSNAT("192.168.8.0/24", `,{"masquerade":{}}`, "enp1s0"), spec) {
+		t.Fatal("expected match")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATWrongOIfName(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	live := nftJSONWithSNAT("192.168.8.0/24", `,{"masquerade":null}`, "enp2s0")
+	if semanticMatchJSON(live, spec) {
+		t.Fatal("a rule on the wrong interface must not match: the masquerade would catch nothing")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATStaleExtraInterface(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	live := nftJSONWithSNAT("192.168.8.0/24", `,{"masquerade":null}`, "enp1s0", "enp2s0")
+	if semanticMatchJSON(live, spec) {
+		t.Fatal("a leftover rule for a removed interface must read as drift")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATMissingMasquerade(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	live := nftJSONWithSNAT("192.168.8.0/24", ``, "enp1s0")
+	if semanticMatchJSON(live, spec) {
+		t.Fatal("right interface but no NAT statement must not match")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATWrongSkipPrefix(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	live := nftJSONWithSNAT("192.168.1.0/24", `,{"masquerade":null}`, "enp1s0")
+	if semanticMatchJSON(live, spec) {
+		t.Fatal("a stale LAN skip guard must read as drift")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATMissingChain(t *testing.T) {
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	if semanticMatchJSON(`{"nftables":[]}`, spec) {
+		t.Fatal("a missing postrouting chain must not match")
+	}
+}
+
+func TestSemanticMatchJSON_DirectSNATAcceptsSnatToAddr(t *testing.T) {
+	// hasNATStmtInExpr also recognises an explicit snat, not just masquerade.
+	spec := snatMatchSpec("192.168.8.0/24", "enp1s0")
+	live := nftJSONWithSNAT("192.168.8.0/24", `,{"snat":{"addr":"192.168.8.162"}}`, "enp1s0")
+	if !semanticMatchJSON(live, spec) {
+		t.Fatal("an explicit snat statement should satisfy the NAT requirement")
+	}
+}

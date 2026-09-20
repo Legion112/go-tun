@@ -254,3 +254,123 @@ func TestCompile_NoLANIfacesStillClearsAll(t *testing.T) {
 		t.Fatal("all.send_redirects should be cleared even with no LAN interfaces")
 	}
 }
+
+func directSNATPolicy(ifaces ...string) policy.Policy {
+	p := testPolicy(true)
+	p.DirectSNAT = true
+	p.LANIfaces = ifaces
+	return p
+}
+
+func postroutingChain(t *testing.T, st policy.DesiredKernelState) *policy.NftChainSpec {
+	t.Helper()
+	for i, ch := range st.Nft.Chains {
+		if ch.Hook == "postrouting" {
+			return &st.Nft.Chains[i]
+		}
+	}
+	return nil
+}
+
+func TestCompile_DirectSNATAddsPostroutingChain(t *testing.T) {
+	st, err := policy.Compile(directSNATPolicy("enp1s0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := postroutingChain(t, st)
+	if ch == nil {
+		t.Fatal("expected a postrouting chain")
+	}
+	if ch.Type != "nat" || ch.Priority != policy.SrcNatPriority || ch.Policy != "accept" {
+		t.Fatalf("chain = %+v", *ch)
+	}
+	if len(ch.Rules) != 1 {
+		t.Fatalf("want one rule, got %d", len(ch.Rules))
+	}
+	r := ch.Rules[0]
+	if r.Description != "snat-direct" || !r.SNATMasquerade {
+		t.Fatalf("rule = %+v", r)
+	}
+	if len(r.OIfNames) != 1 || r.OIfNames[0] != "enp1s0" {
+		t.Fatalf("OIfNames = %v", r.OIfNames)
+	}
+	// The LAN skip guard must be present, or client-to-client traffic gets NATed.
+	if len(r.ExcludePrefixes) != 1 || r.ExcludePrefixes[0].String() != "10.10.0.0/24" {
+		t.Fatalf("ExcludePrefixes = %v", r.ExcludePrefixes)
+	}
+}
+
+func TestCompile_NoDirectSNATByDefault(t *testing.T) {
+	st, err := policy.Compile(testPolicy(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := postroutingChain(t, st); ch != nil {
+		t.Fatalf("no postrouting chain expected by default, got %+v", *ch)
+	}
+}
+
+// Compile must stay total: LANIfaces comes from live interface discovery, so a
+// host that matches nothing must not make Compile fail.
+func TestCompile_DirectSNATWithoutLANIfacesSkipsChain(t *testing.T) {
+	st, err := policy.Compile(directSNATPolicy())
+	if err != nil {
+		t.Fatalf("Compile should not fail: %v", err)
+	}
+	if ch := postroutingChain(t, st); ch != nil {
+		t.Fatal("no interfaces means no chain")
+	}
+}
+
+// snatOnlyState is a minimal state differing ONLY in the SNAT rule fields.
+//
+// Compiling two policies with different LANIfaces would also change the
+// per-device send_redirects sysctls, so SemanticEqual would differ for the wrong
+// reason and the test would pass even with normalize() broken. Build the states
+// directly to isolate the field under test.
+func snatOnlyState(oif string, masq bool) policy.DesiredKernelState {
+	return policy.DesiredKernelState{
+		Nft: policy.NftSpec{
+			Family: policy.OwnedNftFamily,
+			Table:  policy.OwnedNftTable,
+			Chains: []policy.NftChainSpec{{
+				Name: "postrouting", Type: "nat", Hook: "postrouting",
+				Priority: policy.SrcNatPriority, Policy: "accept",
+				Rules: []policy.NftRuleSpec{{
+					Description:    "snat-direct",
+					OIfNames:       []string{oif},
+					SNATMasquerade: masq,
+				}},
+			}},
+		},
+	}
+}
+
+// Guards normalize(): if OIfNames is not copied there, both sides normalise to
+// nil and two genuinely different states compare equal -- drift goes undetected.
+func TestSemanticEqual_DirectSNATOIfNameChangeDiffers(t *testing.T) {
+	if policy.SemanticEqual(snatOnlyState("enp1s0", true), snatOnlyState("enp2s0", true)) {
+		t.Fatal("a different output interface must not compare equal")
+	}
+}
+
+// Same guard for the masquerade flag.
+func TestSemanticEqual_DirectSNATMasqueradeFlagDiffers(t *testing.T) {
+	if policy.SemanticEqual(snatOnlyState("enp1s0", true), snatOnlyState("enp1s0", false)) {
+		t.Fatal("dropping the masquerade statement must not compare equal")
+	}
+}
+
+func TestSemanticEqual_DirectSNATToggleDiffers(t *testing.T) {
+	on, err := policy.Compile(directSNATPolicy("enp1s0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, err := policy.Compile(testPolicy(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.SemanticEqual(on, off) {
+		t.Fatal("enabling direct SNAT must not compare equal to leaving it off")
+	}
+}

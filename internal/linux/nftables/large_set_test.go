@@ -69,3 +69,88 @@ func TestLargeRUSet_CompileAndRender(t *testing.T) {
 	t.Logf("RU prefixes=%d compile+checks=%s render=%s script=%d bytes batches=%d",
 		len(prefs), time.Since(start), renderDur, len(script), batches)
 }
+
+func snatSpec(lans []string, oifs []string) policy.NftSpec {
+	var pfx []netip.Prefix
+	for _, l := range lans {
+		pfx = append(pfx, netip.MustParsePrefix(l))
+	}
+	return policy.NftSpec{
+		Family: "inet", Table: "gotun",
+		Chains: []policy.NftChainSpec{{
+			Name: "postrouting", Type: "nat", Hook: "postrouting",
+			Priority: policy.SrcNatPriority, Policy: "accept",
+			Rules: []policy.NftRuleSpec{{
+				Description:     "snat-direct",
+				OIfNames:        oifs,
+				ExcludePrefixes: pfx,
+				SNATMasquerade:  true,
+			}},
+		}},
+	}
+}
+
+func TestRenderFullTable_DirectSNATChainAndRule(t *testing.T) {
+	script := nftables.RenderFullTable(snatSpec([]string{"192.168.8.0/24"}, []string{"enp1s0"}))
+	wantChain := "add chain inet gotun postrouting { type nat hook postrouting priority 100; policy accept; }"
+	wantSkip := `ip daddr 192.168.8.0/24 return comment "snat-skip-lan"`
+	wantMasq := `meta nfproto ipv4 oifname "enp1s0" fib saddr type != local counter masquerade comment "snat-direct"`
+	for _, want := range []string{wantChain, wantSkip, wantMasq} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	// Guards must precede the masquerade: emission order is evaluation order.
+	if strings.Index(script, wantSkip) > strings.Index(script, wantMasq) {
+		t.Fatalf("skip guard must come before the masquerade:\n%s", script)
+	}
+}
+
+func TestRenderFullTable_DirectSNATFansOutPerInterface(t *testing.T) {
+	script := nftables.RenderFullTable(snatSpec(
+		[]string{"192.168.8.0/24", "192.168.9.0/24"},
+		[]string{"enp1s0", "enp2s0"}))
+	if n := strings.Count(script, `comment "snat-direct"`); n != 2 {
+		t.Fatalf("want one masquerade rule per interface, got %d:\n%s", n, script)
+	}
+	if n := strings.Count(script, `comment "snat-skip-lan"`); n != 2 {
+		t.Fatalf("want one skip rule per LAN, got %d:\n%s", n, script)
+	}
+}
+
+// renderRuleLines has no default branch, so an unrecognised Description renders
+// nothing at all, silently. Assert every compiled rule produces output.
+func TestRenderFullTable_EveryCompiledRuleRenders(t *testing.T) {
+	p := policy.Policy{
+		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
+		TunnelInterface: "wg-exit",
+		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
+		LANIfaces:       []string{"eth0"},
+		Mark:            policy.DefaultMark,
+		Table:           policy.DefaultTableID,
+		RulePriority:    policy.DefaultRulePriority,
+		FailMode:        policy.FailClosed,
+		TunnelUp:        true,
+		DirectSNAT:      true,
+		InboundWireGuard: policy.WireGuardConfig{
+			PrivateKey: "aGVsbG8gd29ybGQgaGVsbG8gd29ybGQgaGVsbG8gd28=",
+			ListenPort: 51821,
+		},
+	}
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := nftables.RenderFullTable(st.Nft)
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if !strings.Contains(script, "add rule inet gotun "+ch.Name) {
+				t.Fatalf("chain %q produced no rules at all:\n%s", ch.Name, script)
+			}
+			if r.Description != "" && !strings.Contains(script, r.Description) {
+				t.Fatalf("rule %q in chain %q rendered nothing:\n%s", r.Description, ch.Name, script)
+			}
+		}
+	}
+}

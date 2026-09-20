@@ -62,6 +62,10 @@ type liveRule struct {
 	IIfNames []string
 	// SetNames referenced in daddr set lookups (@home_nets).
 	SetNames []string
+	// OIfNames from meta oifname matches.
+	OIfNames []string
+	// Masquerade is true when the rule carries a source-NAT statement.
+	Masquerade bool
 }
 
 func semanticMatchJSON(out string, spec policy.NftSpec) bool {
@@ -132,6 +136,42 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 			}
 		}
 		return false
+	case want.Description == "snat-direct":
+		// The default comment-counting branch is not good enough here: it would
+		// accept a rule pointing at the wrong interface, or guarded by stale LAN
+		// prefixes, and report convergence while the masquerade matches nothing --
+		// silently reinstating the bug this rule exists to fix.
+		wantSkip := map[string]struct{}{}
+		for _, p := range want.ExcludePrefixes {
+			wantSkip[p.String()] = struct{}{}
+		}
+		if !stringSetsEqual(daddrsForComment(rules, chain, "snat-skip-lan"), wantSkip) {
+			return false
+		}
+		haveOIf := map[string]struct{}{}
+		n := 0
+		for _, r := range rules {
+			if r.Chain != chain || r.Comment != "snat-direct" {
+				continue
+			}
+			n++
+			if want.SNATMasquerade && !r.Masquerade {
+				return false
+			}
+			for _, o := range r.OIfNames {
+				haveOIf[o] = struct{}{}
+			}
+		}
+		// Exact count, so a leftover rule for a removed interface reads as drift
+		// rather than passing.
+		if n != len(want.OIfNames) {
+			return false
+		}
+		wantOIf := map[string]struct{}{}
+		for _, o := range want.OIfNames {
+			wantOIf[o] = struct{}{}
+		}
+		return stringSetsEqual(haveOIf, wantOIf)
 	case want.Description == "isolate-inbound-from-home":
 		for _, r := range rules {
 			if r.Chain != chain || r.Comment != "isolate-inbound-from-home" {
@@ -316,6 +356,8 @@ func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
 	}
 	r.DAddrs = findDAddrsInExpr(rule.Expr)
 	r.IIfNames = findIIfNamesInExpr(rule.Expr)
+	r.OIfNames = findOIfNamesInExpr(rule.Expr)
+	r.Masquerade = hasNATStmtInExpr(rule.Expr)
 	r.SetNames = findSetNamesInExpr(rule.Expr)
 	return r, rule.Chain != ""
 }
@@ -442,6 +484,16 @@ func matchRightToString(right json.RawMessage) (string, bool) {
 }
 
 func findIIfNamesInExpr(exprs []json.RawMessage) []string {
+	return findMetaMatchesInExpr(exprs, "iifname")
+}
+
+func findOIfNamesInExpr(exprs []json.RawMessage) []string {
+	return findMetaMatchesInExpr(exprs, "oifname")
+}
+
+// findMetaMatchesInExpr returns the right-hand string of every match whose left
+// side is meta <metaKey>. The comparison operator is ignored.
+func findMetaMatchesInExpr(exprs []json.RawMessage, metaKey string) []string {
 	var out []string
 	seen := map[string]struct{}{}
 	var walk func([]json.RawMessage)
@@ -452,7 +504,7 @@ func findIIfNamesInExpr(exprs []json.RawMessage) []string {
 				continue
 			}
 			if mraw, ok := obj["match"]; ok {
-				if name, ok := iifNameFromMatch(mraw); ok {
+				if name, ok := metaNameFromMatch(mraw, metaKey); ok {
 					if _, dup := seen[name]; !dup {
 						seen[name] = struct{}{}
 						out = append(out, name)
@@ -471,7 +523,40 @@ func findIIfNamesInExpr(exprs []json.RawMessage) []string {
 	return out
 }
 
-func iifNameFromMatch(mraw json.RawMessage) (string, bool) {
+// hasNATStmtInExpr reports whether any statement is a source-NAT statement.
+//
+// A bare masquerade serialises as {"masquerade": null}, so this tests for key
+// presence only and must never unmarshal the value.
+func hasNATStmtInExpr(exprs []json.RawMessage) bool {
+	found := false
+	var walk func([]json.RawMessage)
+	walk = func(exprs []json.RawMessage) {
+		for _, raw := range exprs {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				continue
+			}
+			if _, ok := obj["masquerade"]; ok {
+				found = true
+				return
+			}
+			if _, ok := obj["snat"]; ok {
+				found = true
+				return
+			}
+			for _, v := range obj {
+				var nested []json.RawMessage
+				if json.Unmarshal(v, &nested) == nil {
+					walk(nested)
+				}
+			}
+		}
+	}
+	walk(exprs)
+	return found
+}
+
+func metaNameFromMatch(mraw json.RawMessage, metaKey string) (string, bool) {
 	var m struct {
 		Left  json.RawMessage `json:"left"`
 		Right json.RawMessage `json:"right"`
@@ -484,7 +569,7 @@ func iifNameFromMatch(mraw json.RawMessage) (string, bool) {
 			Key string `json:"key"`
 		} `json:"meta"`
 	}
-	if json.Unmarshal(m.Left, &metaWrap) != nil || metaWrap.Meta.Key != "iifname" {
+	if json.Unmarshal(m.Left, &metaWrap) != nil || metaWrap.Meta.Key != metaKey {
 		return "", false
 	}
 	var s string
@@ -617,6 +702,18 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 				lines = append(lines, fmt.Sprintf(`ip daddr %s counter return comment "exclude-endpoint"`, a.String()))
 			}
 			lines = append(lines, fmt.Sprintf(`ip daddr != @%s meta mark set 0x%x comment "mark-non-direct"`, rule.DirectSet, rule.Mark))
+		case rule.Description == "snat-direct":
+			for _, pfx := range rule.ExcludePrefixes {
+				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "snat-skip-lan"`, pfx.String()))
+			}
+			if !rule.SNATMasquerade {
+				break
+			}
+			for _, oif := range rule.OIfNames {
+				lines = append(lines, fmt.Sprintf(
+					`meta nfproto ipv4 oifname %q fib saddr type != local counter masquerade comment "snat-direct"`,
+					oif))
+			}
 		case rule.Description == "isolate-inbound-from-home":
 			lines = append(lines, fmt.Sprintf(`iifname "%s" ip daddr @%s drop comment "isolate-inbound-from-home"`, rule.IIfName, rule.DropDstSet))
 		}

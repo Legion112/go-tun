@@ -24,6 +24,16 @@ const (
 	DefaultForeignEchoURL = "https://api.ipify.org"
 	DefaultLargeURL       = "https://speed.cloudflare.com/__down?bytes=10000000"
 	DefaultLargeBytes     = 10000000
+
+	// DefaultDirectURL is served from inside ru_nets, so it exercises the
+	// DIRECT class. The tunnel-class probe above cannot see a broken direct
+	// path -- a gateway whose direct class ran at 5 KB/s once passed every
+	// other check in this tool.
+	DefaultDirectURL = "https://mirror.yandex.ru/debian/dists/stable/Release"
+	// DefaultMinDirectSpeed is a floor, not a benchmark. The failure this
+	// guards against is ~1000x below it, so a loose floor separates "broken"
+	// from "slow link" without being flaky.
+	DefaultMinDirectSpeed = 100 * 1024
 )
 
 // Check is one verification result.
@@ -49,10 +59,18 @@ type VerifyOptions struct {
 	LargeURL   string
 	LargeBytes int64
 
+	// DirectURL is fetched to measure the direct (non-tunnel) class.
+	DirectURL string
+	// DirectIP pins DirectURL's host, so the probe cannot silently drift onto
+	// an address outside the direct set.
+	DirectIP       netip.Addr
+	MinDirectSpeed int64
+
 	DNSNames []string
 
 	SkipEgress bool
 	SkipLarge  bool
+	SkipDirect bool
 	Timeout    time.Duration
 }
 
@@ -128,6 +146,28 @@ func Verify(r linux.Runner, w io.Writer, o VerifyOptions) error {
 			add("large-transfer", fmt.Errorf("got %d of %d bytes in %s (MTU/MSS black hole?)", n, o.LargeBytes, dur.Round(time.Millisecond)), "")
 		default:
 			add("large-transfer", nil, fmt.Sprintf("%d bytes in %s", n, dur.Round(time.Millisecond)))
+		}
+	}
+
+	// Direct-class throughput. Separate from the check above because the two
+	// classes take entirely different paths and only one of them was covered.
+	if !o.SkipDirect && o.DirectURL != "" {
+		n, dur, err := downloadPinned(o.DirectURL, o.DirectIP, 45*time.Second)
+		switch {
+		case err != nil:
+			add("large-transfer-direct", err, "")
+		case n == 0:
+			add("large-transfer-direct", fmt.Errorf("no data from %s", o.DirectURL), "")
+		default:
+			speed := int64(float64(n) / dur.Seconds())
+			if o.MinDirectSpeed > 0 && speed < o.MinDirectSpeed {
+				add("large-transfer-direct", fmt.Errorf(
+					"%d bytes in %s = %d B/s, below the %d B/s floor -- the direct class is degraded (hairpin without SNAT?)",
+					n, dur.Round(time.Millisecond), speed, o.MinDirectSpeed), "")
+			} else {
+				add("large-transfer-direct", nil, fmt.Sprintf("%d bytes in %s (%d B/s)",
+					n, dur.Round(time.Millisecond), speed))
+			}
 		}
 	}
 
@@ -219,7 +259,11 @@ func echoEgress(rawURL string, pin netip.Addr, timeout time.Duration) (string, e
 }
 
 func download(rawURL string, timeout time.Duration) (int64, time.Duration, error) {
-	client := pinnedClient(netip.Addr{}, timeout)
+	return downloadPinned(rawURL, netip.Addr{}, timeout)
+}
+
+func downloadPinned(rawURL string, pin netip.Addr, timeout time.Duration) (int64, time.Duration, error) {
+	client := pinnedClient(pin, timeout)
 	start := time.Now()
 	resp, err := client.Get(rawURL)
 	if err != nil {

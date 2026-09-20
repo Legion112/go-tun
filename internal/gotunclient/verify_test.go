@@ -177,3 +177,87 @@ func TestVerify_AllPassingReturnsNil(t *testing.T) {
 		t.Fatalf("output:\n%s", out.String())
 	}
 }
+
+// The direct-class probe exists because a broken direct path passed every other
+// check. A throughput floor is what distinguishes "degraded" from "working".
+func TestVerify_DirectClassBelowFloorFails(t *testing.T) {
+	restoreDetect(t)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 2 KB dribbled out over ~0.4s => ~5 KB/s, the shape of the real fault.
+		for i := 0; i < 4; i++ {
+			w.Write([]byte(strings.Repeat("x", 512)))
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer slow.Close()
+
+	r := statusRunner(t)
+	onLinkAll(r)
+	r.Outputs["ip -4 route get 1.1.1.1"] = routeGetViaGotun
+	var out strings.Builder
+	err := Verify(r, &out, VerifyOptions{
+		Gateway:        netip.MustParseAddr(testGW),
+		Probe:          netip.MustParseAddr("1.1.1.1"),
+		SkipEgress:     true,
+		SkipLarge:      true,
+		DirectURL:      slow.URL,
+		MinDirectSpeed: 100 * 1024,
+	})
+	if err == nil {
+		t.Fatal("a direct class running far below the floor must fail the gate")
+	}
+	if !strings.Contains(out.String(), "FAIL  large-transfer-direct") {
+		t.Fatalf("output should name the failing check:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "below the") {
+		t.Fatalf("failure should explain the floor:\n%s", out.String())
+	}
+}
+
+func TestVerify_DirectClassAboveFloorPasses(t *testing.T) {
+	restoreDetect(t)
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.Repeat("x", 512*1024)))
+	}))
+	defer fast.Close()
+
+	r := statusRunner(t)
+	onLinkAll(r)
+	r.Outputs["ip -4 route get 1.1.1.1"] = routeGetViaGotun
+	var out strings.Builder
+	err := Verify(r, &out, VerifyOptions{
+		Gateway:        netip.MustParseAddr(testGW),
+		Probe:          netip.MustParseAddr("1.1.1.1"),
+		SkipEgress:     true,
+		SkipLarge:      true,
+		DirectURL:      fast.URL,
+		MinDirectSpeed: 100 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("a healthy direct class must pass: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "ok    large-transfer-direct") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+func TestVerify_DirectClassSkippedWhenURLEmpty(t *testing.T) {
+	restoreDetect(t)
+	r := statusRunner(t)
+	onLinkAll(r)
+	r.Outputs["ip -4 route get 1.1.1.1"] = routeGetViaGotun
+	var out strings.Builder
+	if err := Verify(r, &out, VerifyOptions{
+		Gateway:    netip.MustParseAddr(testGW),
+		Probe:      netip.MustParseAddr("1.1.1.1"),
+		SkipEgress: true,
+		SkipLarge:  true,
+		SkipDirect: true,
+	}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if strings.Contains(out.String(), "large-transfer-direct") {
+		t.Fatalf("direct probe should be absent:\n%s", out.String())
+	}
+}
