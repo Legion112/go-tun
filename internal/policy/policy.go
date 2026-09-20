@@ -1,14 +1,67 @@
 package policy
 
-import "net/netip"
+import (
+	"fmt"
+	"net/netip"
+)
 
 // FailMode controls non-RU behavior when the tunnel is unavailable.
 type FailMode int
 
 const (
-	// FailClosed blackholes marked (non-RU) traffic when the tunnel is down.
-	FailClosed FailMode = iota
+	// FailOpen withdraws the tunnel route and installs nothing in its place, so
+	// the policy-routing lookup misses and the RPDB continues to the main table,
+	// i.e. marked traffic falls back to the ordinary uplink.
+	//
+	// This is the zero value and the default: on a household gateway, losing the
+	// tunnel should degrade to plain internet rather than to no internet.
+	//
+	// The cost is that the fallback is SILENT. Traffic intended for the exit hop
+	// egresses the local ISP with nothing logged, so a dead tunnel looks like a
+	// working network that has quietly stopped hiding where you are. Detecting it
+	// requires an egress-identity check, not an error.
+	FailOpen FailMode = iota
+	// FailClosed blackholes marked (non-RU) traffic when the tunnel is down, so
+	// it cannot leak to the uplink. Prefer this when a silent fallback would be
+	// worse than an outage.
+	FailClosed
 )
+
+func (m FailMode) String() string {
+	if m == FailClosed {
+		return "closed"
+	}
+	return "open"
+}
+
+// DefaultNonRoutable are destinations that can never sensibly be reached through
+// an exit hop: private space, CGNAT, link-local, loopback and multicast.
+//
+// Multicast matters more than it looks: mDNS and SSDP are LAN-sourced and are not
+// in a country prefix set, so without this they get marked and routed off the
+// segment, which breaks Chromecast and AirPlay discovery.
+func DefaultNonRoutable() []netip.Prefix {
+	return []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+	}
+}
+
+// ParseFailMode parses the -fail-mode flag value.
+func ParseFailMode(s string) (FailMode, error) {
+	switch s {
+	case "open", "":
+		return FailOpen, nil
+	case "closed":
+		return FailClosed, nil
+	}
+	return FailOpen, fmt.Errorf("unknown fail mode %q (want open or closed)", s)
+}
 
 const (
 	// OwnedNftTable is the nftables table owned exclusively by gotun.
@@ -58,6 +111,26 @@ type Policy struct {
 	// InboundWireGuard is the clients-facing listen interface (WAN peers via port-forward).
 	// When set (PrivateKey non-empty), compile installs home_nets forward isolation.
 	InboundWireGuard WireGuardConfig
+	// MarkIIfNames restricts marking to these ingress interfaces. Empty means
+	// mark traffic arriving on any interface, which is safe on a dedicated
+	// gateway box but not on a router: the prerouting hook also sees WAN-inbound
+	// traffic, so an unscoped rule marks reply packets whose destination is the
+	// router's own address. Only the local table sitting at rule priority 0 then
+	// stands between that and a lost management path.
+	MarkIIfNames []string
+	// NonRoutablePrefixes are destinations that must never be marked, on top of
+	// LANs. Distinct from LANs because LANs also drives home_nets isolation and
+	// the SNAT skip list, whereas this is purely "traffic that cannot sensibly
+	// leave via an exit hop": RFC1918, CGNAT, link-local, loopback, multicast.
+	NonRoutablePrefixes []netip.Prefix
+	// DropIPv6 installs an IPv6 drop rule and disables IPv6 via sysctl.
+	//
+	// Off by default. It is the right call on a box that only routes a
+	// split-tunnel policy, and the wrong call on a household router: it takes
+	// IPv6 away from every device, and Clear does not put it back. Leaving it off
+	// means IPv6 is not classified at all, so it must not be reachable -- verify
+	// that separately rather than assuming it.
+	DropIPv6 bool
 	// DirectSNAT masquerades the direct class as it leaves LANIfaces.
 	//
 	// Required whenever clients reach the gateway over the same L2 segment the
@@ -148,6 +221,9 @@ type NftRuleSpec struct {
 	// IIfName + DropDstSet: drop forwarded packets from iface to destinations in set.
 	IIfName    string
 	DropDstSet string
+	// IIfNames: restrict to these ingress interfaces (rendered as a guard that
+	// returns for anything else).
+	IIfNames []string
 	// OIfNames: output interfaces this rule applies to; one nft rule per entry.
 	OIfNames []string
 	// SNATMasquerade emits a masquerade statement.

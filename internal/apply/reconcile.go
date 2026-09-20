@@ -2,6 +2,7 @@ package apply
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/legion/go-tun/internal/linux"
 	"github.com/legion/go-tun/internal/linux/nftables"
@@ -15,6 +16,27 @@ import (
 type Result struct {
 	Changes int
 	State   policy.DesiredKernelState
+	// Components breaks Changes down per subsystem, in the order they ran. A bare
+	// total says an apply did not converge but not where, which is the hard part
+	// to diagnose on a box you cannot easily instrument.
+	Components []ComponentChanges
+}
+
+// ComponentChanges is one subsystem's contribution to a reconcile.
+type ComponentChanges struct {
+	Name    string
+	Changes int
+}
+
+// Summary renders the non-zero components as "nftables=1 routing=2".
+func (r Result) Summary() string {
+	var parts []string
+	for _, c := range r.Components {
+		if c.Changes != 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", c.Name, c.Changes))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // Reconcile applies Policy to the kernel via DesiredKernelState.
@@ -26,39 +48,38 @@ func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	total := 0
+	res := Result{State: st}
+	step := func(name string, c int, err error) error {
+		res.Changes += c
+		res.Components = append(res.Components, ComponentChanges{Name: name, Changes: c})
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	}
 
 	c, err := sysctl.Reconcile(r, st.Sysctls)
-	total += c
-	if err != nil {
-		return Result{Changes: total, State: st}, fmt.Errorf("sysctl: %w", err)
+	if err := step("sysctl", c, err); err != nil {
+		return res, err
 	}
-
 	c, err = nftables.Reconcile(r, st.Nft)
-	total += c
-	if err != nil {
-		return Result{Changes: total, State: st}, fmt.Errorf("nftables: %w", err)
+	if err := step("nftables", c, err); err != nil {
+		return res, err
 	}
-
 	c, err = wireguard.Reconcile(r, st.WireGuard)
-	total += c
-	if err != nil {
-		return Result{Changes: total, State: st}, fmt.Errorf("wireguard: %w", err)
+	if err := step("wireguard", c, err); err != nil {
+		return res, err
 	}
-
 	c, err = wireguard.Reconcile(r, st.WireGuardClients)
-	total += c
-	if err != nil {
-		return Result{Changes: total, State: st}, fmt.Errorf("wireguard-clients: %w", err)
+	if err := step("wireguard-clients", c, err); err != nil {
+		return res, err
 	}
-
 	c, err = routing.Reconcile(r, st.IPRules, st.Routes)
-	total += c
-	if err != nil {
-		return Result{Changes: total, State: st}, fmt.Errorf("routing: %w", err)
+	if err := step("routing", c, err); err != nil {
+		return res, err
 	}
 
-	return Result{Changes: total, State: st}, nil
+	return res, nil
 }
 
 // Clear removes gotun-owned kernel objects.

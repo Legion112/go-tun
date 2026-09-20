@@ -155,6 +155,7 @@ AllowedIPs = 10.98.0.2/32
 
 	must(t, lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",

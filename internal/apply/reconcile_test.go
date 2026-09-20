@@ -175,3 +175,49 @@ func TestReconcile_DirectSNATInSingleTransaction(t *testing.T) {
 		}
 	}
 }
+
+// The breakdown must account for the whole total, or it misleads exactly when it
+// is being relied on: an apply that reports changes but attributes none of them.
+func TestReconcile_ComponentsAccountForTheTotal(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	res, err := apply.Reconcile(r, basePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Changes == 0 {
+		t.Fatal("a first apply against an empty box must report changes")
+	}
+	sum := 0
+	for _, c := range res.Components {
+		sum += c.Changes
+	}
+	if sum != res.Changes {
+		t.Fatalf("components sum to %d but total is %d: %v", sum, res.Changes, res.Components)
+	}
+	if !strings.Contains(res.Summary(), "nftables=") {
+		t.Fatalf("summary should name the subsystem that changed, got %q", res.Summary())
+	}
+}
+
+// A failing subsystem must still be named and still carry its partial count, so a
+// mid-way abort says how far the apply got.
+func TestReconcile_FailedComponentIsStillReported(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.FailOn = "nft"
+	res, err := apply.Reconcile(r, basePolicy())
+	if err == nil {
+		t.Fatal("expected the nft failure to surface")
+	}
+	if !strings.Contains(err.Error(), "nftables") {
+		t.Fatalf("error should name the subsystem, got %v", err)
+	}
+	last := res.Components[len(res.Components)-1]
+	if last.Name != "nftables" {
+		t.Fatalf("the failing subsystem should be the last recorded, got %q", last.Name)
+	}
+	for _, c := range res.Components {
+		if c.Name == "routing" {
+			t.Fatal("subsystems after the failure must not be recorded")
+		}
+	}
+}

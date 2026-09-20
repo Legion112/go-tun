@@ -17,6 +17,12 @@ import (
 
 const image = "gotun:lab"
 
+// labNonRoutable replaces the production default non-routable list for the lab.
+// That default excludes all of RFC1918, and every lab network is 10.x -- left at
+// the default there is nothing in this topology to classify, and the tests quietly
+// pass because traffic reaches its destination by some other path.
+const labNonRoutable = "169.254.0.0/16,127.0.0.0/8,224.0.0.0/4"
+
 func requireDocker(t *testing.T) {
 	t.Helper()
 	if os.Getenv("GOTUN_INTEGRATION") == "" {
@@ -75,6 +81,9 @@ func setupTopo(t *testing.T) *topo {
 	must(t, lab.RunContainer(ctx, "exit", image, "10.20.0.3", "wgnet", map[string]string{
 		"foreign": "10.30.0.2",
 	}))
+	must(t, lab.RunContainer(ctx, "isp", image, "10.20.0.4", "wgnet", map[string]string{
+		"foreign": "10.30.0.3",
+	}))
 	must(t, lab.RunContainer(ctx, "ru-dest", image, "10.200.0.10", "ru", nil, harness.RunOpts{
 		Entrypoint: []string{"labhttp"},
 		Cmd:        []string{"-listen", ":8080", "-body", "RU"},
@@ -84,7 +93,7 @@ func setupTopo(t *testing.T) *topo {
 		Cmd:        []string{"-listen", ":8080", "-body", "FOREIGN"},
 	}))
 
-	for _, n := range []string{"client", "gotun", "exit", "ru-dest", "foreign-dest"} {
+	for _, n := range []string{"client", "gotun", "exit", "isp", "ru-dest", "foreign-dest"} {
 		must(t, lab.WaitReady(ctx, n))
 	}
 
@@ -143,12 +152,38 @@ PersistentKeepalive = 5
 
 	// Apply gotun policy (tunnel up)
 	must(t, lab.ExecOK(ctx, "gotun", "gotun", "apply",
+		// The lab asserts fail-closed semantics in several places, so pin the
+		// mode rather than relying on the default (which is now open).
+		"-fail-mode", "closed",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
 	))
+
+	// Stand up the ISP hop and give the gotun box an uplink through it. Every lab
+	// network is an internal bridge, so without this there is nothing in main to
+	// fall back to and fail-open is untestable. It has to be a hop distinct from
+	// exit: sharing exit would leave the tunnel as the only return path, which is
+	// the very thing a fail-open test needs to do without. Like a real ISP it NATs,
+	// so replies come back to it and never depend on the tunnel.
+	must(t, lab.ExecOK(ctx, "isp", "ip", "route", "replace", "10.10.0.0/24", "via", "10.20.0.2"))
+	must(t, lab.ExecOK(ctx, "isp", "bash", "-c", `
+set -e
+nft add table inet ispnat || true
+nft 'add chain inet ispnat postrouting { type nat hook postrouting priority 100 ; }' || true
+nft add rule inet ispnat postrouting oifname != "lo" masquerade || true
+`))
+	// A default route, not a route for the foreign prefix: the tunnel's AllowedIPs
+	// name 10.30.0.0/24, and ensureAllowedIPRoutes installs those into main, so a
+	// same-prefix uplink route gets clobbered on every apply and never converges.
+	// A default also matches the real gateway, whose AllowedIPs is 0.0.0.0/0 and
+	// therefore skipped. Marked traffic only reaches it when table 100 misses, so
+	// the fail-closed tests now prove the blackhole is what stops traffic rather
+	// than a missing route.
+	must(t, lab.ExecOK(ctx, "gotun", "ip", "route", "replace", "default", "via", "10.20.0.4"))
 
 	// Client: default via gotun, keep LAN on-link
 	must(t, lab.ExecOK(ctx, "client", "ip", "route", "replace", "default", "via", "10.10.0.2"))
@@ -194,6 +229,7 @@ func TestFailClosed_WGDownWithoutReapply(t *testing.T) {
 
 	// Tear down the tunnel datapath without asking gotun to re-apply.
 	// Table 100 must still terminate marked traffic (blackhole fallback).
+	// setupTopo applied with -fail-mode closed, so the blackhole is present.
 	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg-exit", "down"))
 
 	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id"); err == nil {
@@ -212,10 +248,12 @@ func TestFailClosed_ApplyTunnelDown(t *testing.T) {
 	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg-exit", "down"))
 	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "false",
+		"-fail-mode", "closed",
 	))
 
 	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id"); err == nil {
@@ -248,10 +286,12 @@ func TestIdempotentApply(t *testing.T) {
 
 	out1, err := tp.lab.Exec(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
+		"-fail-mode", "closed",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -292,10 +332,12 @@ func TestAtomicPrefixSwapUnderTraffic(t *testing.T) {
 
 	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru2.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
+		"-fail-mode", "closed",
 	))
 
 	select {
@@ -319,6 +361,7 @@ func TestPartialFailureThenReapply(t *testing.T) {
 	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "route", "flush", "table", "100"))
 	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
@@ -389,10 +432,12 @@ func TestDirectSNAT_NoExtraChurnWithRealNft(t *testing.T) {
 
 	base := []string{"gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
 		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
+		"-fail-mode", "closed",
 	}
 	withSNAT := append(append([]string{}, base...), "-direct-snat", "true")
 
@@ -430,5 +475,122 @@ func TestDirectSNAT_NoExtraChurnWithRealNft(t *testing.T) {
 	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
 	if err != nil || strings.TrimSpace(ru) != "RU" {
 		t.Fatalf("RU through direct SNAT: %v %q", err, ru)
+	}
+}
+
+// TestFailOpen_TunnelDownFallsBackToUplink is the household-availability
+// requirement: when the tunnel is unusable, foreign traffic must keep working via
+// the ordinary uplink rather than being dropped.
+func TestFailOpen_TunnelDownFallsBackToUplink(t *testing.T) {
+	tp := setupTopo(t)
+	ctx := context.Background()
+
+	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
+		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
+		"-endpoint", "10.20.0.3",
+		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
+		"-wg-config", "/tmp/wg-exit.conf",
+		"-tunnel-up", "false",
+		"-fail-mode", "open",
+	))
+
+	// No blackhole, and nothing else either -- the lookup must miss so the RPDB
+	// continues to main.
+	rt, err := tp.lab.Exec(ctx, "gotun", "ip", "route", "show", "table", "100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(rt, "blackhole") {
+		t.Fatalf("fail-open must not leave a blackhole in table 100: %q", rt)
+	}
+	if strings.TrimSpace(rt) != "" {
+		t.Fatalf("expected an empty table 100, got %q", rt)
+	}
+
+	// The routing decision: marked traffic must resolve via the uplink in main,
+	// not be terminated and not still name the tunnel.
+	got, err := tp.lab.Exec(ctx, "gotun", "ip", "route", "get", "10.30.0.10", "mark", "0x1")
+	if err != nil {
+		t.Fatalf("route get: %v", err)
+	}
+	for _, bad := range []string{"blackhole", "unreachable", "prohibit", "wg-exit"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("fail-open must fall through to the uplink, got %q", got)
+		}
+	}
+	if !strings.Contains(got, "10.20.0.4") {
+		t.Fatalf("expected the uplink nexthop, got %q", got)
+	}
+
+	// And end to end: the client still reaches the foreign service.
+	fr, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.30.0.10:8080/id")
+	if err != nil || strings.TrimSpace(fr) != "FOREIGN" {
+		t.Fatalf("fail-open must keep foreign traffic working via the uplink: %v %q", err, fr)
+	}
+
+	// RU is unaffected either way.
+	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
+	if err != nil || strings.TrimSpace(ru) != "RU" {
+		t.Fatalf("RU must be unaffected: %v %q", err, ru)
+	}
+
+	// The contrast that makes the above meaningful: with the same uplink present,
+	// fail-closed still terminates marked traffic.
+	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
+		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
+		"-endpoint", "10.20.0.3",
+		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
+		"-wg-config", "/tmp/wg-exit.conf",
+		"-tunnel-up", "false",
+		"-fail-mode", "closed",
+	))
+	closed, err := tp.lab.Exec(ctx, "gotun", "ip", "route", "get", "10.30.0.10", "mark", "0x1")
+	if err == nil && !strings.Contains(closed, "blackhole") && !strings.Contains(closed, "unreachable") {
+		t.Fatalf("fail-closed should terminate the same lookup, got %q", closed)
+	}
+	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.30.0.10:8080/id"); err == nil {
+		t.Fatal("fail-closed must not reach foreign via the uplink")
+	}
+}
+
+// Switching an already-deployed box from fail-closed to fail-open must actively
+// remove the blackhole. This is the trap that unit-tested clean but would have
+// left a live gateway fail-closed while reporting success.
+func TestFailOpen_RemovesAnExistingBlackhole(t *testing.T) {
+	tp := setupTopo(t)
+	ctx := context.Background()
+
+	// setupTopo applied fail-closed, so a blackhole is present.
+	rt, _ := tp.lab.Exec(ctx, "gotun", "ip", "route", "show", "table", "100")
+	if !strings.Contains(rt, "blackhole") {
+		t.Fatalf("precondition: expected a blackhole from setupTopo, got %q", rt)
+	}
+
+	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
+		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
+		"-endpoint", "10.20.0.3",
+		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
+		"-wg-config", "/tmp/wg-exit.conf",
+		"-tunnel-up", "true",
+		"-fail-mode", "open",
+	))
+
+	rt, err := tp.lab.Exec(ctx, "gotun", "ip", "route", "show", "table", "100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(rt, "blackhole") {
+		t.Fatalf("switching to fail-open must delete the blackhole, got %q", rt)
+	}
+	if !strings.Contains(rt, "wg-exit") {
+		t.Fatalf("the tunnel route should remain: %q", rt)
+	}
+	// And traffic still works through the tunnel.
+	fr, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.30.0.10:8080/id")
+	if err != nil || strings.TrimSpace(fr) != "FOREIGN" {
+		t.Fatalf("foreign via tunnel: %v %q", err, fr)
 	}
 }

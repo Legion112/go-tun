@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -30,11 +31,32 @@ func Reconcile(r linux.Runner, rules []policy.IPRuleSpec, routes []policy.RouteS
 		changes++
 	}
 
+	// Owned tables are every table gotun points a rule at, UNION every table it
+	// wants a route in -- not just the latter.
+	//
+	// Deriving the work list from the desired routes alone means a table whose
+	// desired set is empty is never even inspected, so a route left over from a
+	// previous policy survives while apply reports convergence. That is exactly
+	// the fail-open case: withdrawing the tunnel route must also remove a
+	// blackhole installed by an earlier fail-closed apply, or the box stays
+	// fail-closed while claiming otherwise.
 	byTable := map[int][]policy.RouteSpec{}
+	for _, rule := range rules {
+		if _, ok := byTable[rule.Table]; !ok {
+			byTable[rule.Table] = nil
+		}
+	}
 	for _, rt := range routes {
 		byTable[rt.Table] = append(byTable[rt.Table], rt)
 	}
-	for table, want := range byTable {
+	// Sorted, so the command sequence is deterministic for tests and logs.
+	tables := make([]int, 0, len(byTable))
+	for t := range byTable {
+		tables = append(tables, t)
+	}
+	sort.Ints(tables)
+	for _, table := range tables {
+		want := byTable[table]
 		out, _ := r.Run("ip", "route", "show", "table", fmt.Sprintf("%d", table))
 		if tableRoutesMatch(out, want) {
 			continue

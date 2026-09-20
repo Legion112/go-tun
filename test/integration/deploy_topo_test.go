@@ -196,6 +196,7 @@ AllowedIPs = 10.98.0.2/32
 
 	must(t, lab.ExecOK(ctx, "pi", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
+		"-non-routable", labNonRoutable,
 		"-endpoint", deployRemoteHop,
 		// home LAN + clients WG subnet (return path must not be marked into table 100)
 		"-lan", "10.56.0.0/24,10.98.0.0/30",

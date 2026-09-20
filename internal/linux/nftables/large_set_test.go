@@ -154,3 +154,39 @@ func TestRenderFullTable_EveryCompiledRuleRenders(t *testing.T) {
 		}
 	}
 }
+
+func ingressSpec(ifaces ...string) policy.NftSpec {
+	return policy.NftSpec{
+		Family: "inet", Table: "gotun",
+		Chains: []policy.NftChainSpec{{
+			Name: "prerouting", Type: "filter", Hook: "prerouting", Priority: -150, Policy: "accept",
+			Rules: []policy.NftRuleSpec{
+				{Description: "only-marked-ingress", IIfNames: ifaces},
+				{Description: "mark-non-direct", DirectSet: "ru_nets", Mark: 1,
+					ExcludePrefixes: []netip.Prefix{netip.MustParsePrefix("224.0.0.0/4")}},
+			},
+		}},
+	}
+}
+
+func TestRenderFullTable_IngressGuardPrecedesMark(t *testing.T) {
+	script := nftables.RenderFullTable(ingressSpec("br-lan"))
+	guard := `iifname != { "br-lan" } return comment "only-marked-ingress"`
+	if !strings.Contains(script, guard) {
+		t.Fatalf("missing guard:\n%s", script)
+	}
+	if strings.Index(script, guard) > strings.Index(script, `comment "mark-non-direct"`) {
+		t.Fatalf("guard must render before the mark rule:\n%s", script)
+	}
+	// And the multicast exclusion must be there, or mDNS gets routed off-segment.
+	if !strings.Contains(script, `ip daddr 224.0.0.0/4 return comment "exclude-lan"`) {
+		t.Fatalf("missing multicast exclusion:\n%s", script)
+	}
+}
+
+func TestRenderFullTable_IngressGuardListsEveryInterface(t *testing.T) {
+	script := nftables.RenderFullTable(ingressSpec("br-lan", "br-guest"))
+	if !strings.Contains(script, `iifname != { "br-lan", "br-guest" } return`) {
+		t.Fatalf("both interfaces expected in one set:\n%s", script)
+	}
+}

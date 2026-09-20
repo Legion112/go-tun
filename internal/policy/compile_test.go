@@ -374,3 +374,228 @@ func TestSemanticEqual_DirectSNATToggleDiffers(t *testing.T) {
 		t.Fatal("enabling direct SNAT must not compare equal to leaving it off")
 	}
 }
+
+func hasRoute(rs []policy.RouteSpec, blackhole bool, dev string) bool {
+	for _, r := range rs {
+		if blackhole && r.Blackhole {
+			return true
+		}
+		if !blackhole && !r.Blackhole && r.Device == dev {
+			return true
+		}
+	}
+	return false
+}
+
+// Fail-open is the zero value and the documented default.
+func TestFailMode_OpenIsTheZeroValue(t *testing.T) {
+	var m policy.FailMode
+	if m != policy.FailOpen || m.String() != "open" {
+		t.Fatalf("zero value = %v (%q), want FailOpen", m, m.String())
+	}
+}
+
+func TestParseFailMode(t *testing.T) {
+	for in, want := range map[string]policy.FailMode{
+		"open": policy.FailOpen, "": policy.FailOpen, "closed": policy.FailClosed,
+	} {
+		got, err := policy.ParseFailMode(in)
+		if err != nil || got != want {
+			t.Errorf("%q -> %v, %v", in, got, err)
+		}
+	}
+	if _, err := policy.ParseFailMode("blackhole"); err == nil {
+		t.Error("want an error for an unknown mode")
+	}
+}
+
+func TestCompile_FailOpenTunnelUpHasNoBlackhole(t *testing.T) {
+	p := testPolicy(true)
+	p.FailMode = policy.FailOpen
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasRoute(st.Routes, true, "") {
+		t.Fatalf("fail-open must not install a blackhole: %+v", st.Routes)
+	}
+	if !hasRoute(st.Routes, false, "wg-exit") {
+		t.Fatalf("expected the tunnel route: %+v", st.Routes)
+	}
+}
+
+// The requirement: nothing in the owned table, so the RPDB falls through to main.
+func TestCompile_FailOpenTunnelDownInstallsNothing(t *testing.T) {
+	p := testPolicy(false)
+	p.FailMode = policy.FailOpen
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Routes) != 0 {
+		t.Fatalf("fail-open with the tunnel down must desire no routes, got %+v", st.Routes)
+	}
+}
+
+func TestCompile_FailClosedStillBlackholes(t *testing.T) {
+	for _, up := range []bool{true, false} {
+		p := testPolicy(up)
+		p.FailMode = policy.FailClosed
+		st, err := policy.Compile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasRoute(st.Routes, true, "") {
+			t.Fatalf("tunnelUp=%v: fail-closed must keep its blackhole: %+v", up, st.Routes)
+		}
+	}
+}
+
+func TestCompile_IPv6NotTouchedByDefault(t *testing.T) {
+	st, err := policy.Compile(testPolicy(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range st.Sysctls {
+		if strings.Contains(s.Key, "disable_ipv6") {
+			t.Fatalf("IPv6 must not be disabled unless asked: %s=%s", s.Key, s.Value)
+		}
+	}
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if r.DropIPv6 {
+				t.Fatal("no IPv6 drop rule unless asked")
+			}
+		}
+	}
+}
+
+func TestCompile_DropIPv6OptIn(t *testing.T) {
+	p := testPolicy(true)
+	p.DropIPv6 = true
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disables int
+	for _, s := range st.Sysctls {
+		if strings.Contains(s.Key, "disable_ipv6") && s.Value == "1" {
+			disables++
+		}
+	}
+	if disables != 2 {
+		t.Fatalf("want all+default disable_ipv6, got %d", disables)
+	}
+	found := false
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if r.DropIPv6 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected an IPv6 drop rule")
+	}
+}
+
+func TestCompile_MarkIIfNamesAddsIngressGuardBeforeTheMarkRule(t *testing.T) {
+	p := testPolicy(true)
+	p.MarkIIfNames = []string{"br-lan"}
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var guard, mark int = -1, -1
+	for _, ch := range st.Nft.Chains {
+		if ch.Hook != "prerouting" {
+			continue
+		}
+		for i, r := range ch.Rules {
+			switch r.Description {
+			case "only-marked-ingress":
+				guard = i
+				if len(r.IIfNames) != 1 || r.IIfNames[0] != "br-lan" {
+					t.Fatalf("IIfNames = %v", r.IIfNames)
+				}
+			case "mark-non-direct":
+				mark = i
+			}
+		}
+	}
+	if guard < 0 || mark < 0 {
+		t.Fatalf("guard=%d mark=%d", guard, mark)
+	}
+	if guard > mark {
+		t.Fatal("the ingress guard must precede the mark rule or it cannot protect anything")
+	}
+}
+
+func TestCompile_NoIngressGuardWhenUnscoped(t *testing.T) {
+	st, err := policy.Compile(testPolicy(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if r.Description == "only-marked-ingress" {
+				t.Fatal("no guard expected when MarkIIfNames is empty")
+			}
+		}
+	}
+}
+
+func TestCompile_NonRoutablePrefixesAreExcludedFromMarking(t *testing.T) {
+	p := testPolicy(true)
+	p.NonRoutablePrefixes = []netip.Prefix{netip.MustParsePrefix("224.0.0.0/4")}
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if r.Description != "mark-non-direct" {
+				continue
+			}
+			for _, pfx := range r.ExcludePrefixes {
+				if pfx.String() == "224.0.0.0/4" {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("multicast must be excluded, or mDNS/SSDP get routed off-segment")
+}
+
+func TestDefaultNonRoutable_CoversPrivateAndMulticast(t *testing.T) {
+	got := map[string]bool{}
+	for _, p := range policy.DefaultNonRoutable() {
+		got[p.String()] = true
+	}
+	for _, want := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8", "224.0.0.0/4"} {
+		if !got[want] {
+			t.Errorf("missing %s", want)
+		}
+	}
+}
+
+// Guards normalize(): without IIfNames copied there, two different ingress scopes
+// compare equal and drift is invisible.
+func TestSemanticEqual_MarkIngressScopeChangeDiffers(t *testing.T) {
+	a := testPolicy(true)
+	a.MarkIIfNames = []string{"br-lan"}
+	b := testPolicy(true)
+	b.MarkIIfNames = []string{"br-guest"}
+	sa, err := policy.Compile(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := policy.Compile(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.SemanticEqual(sa, sb) {
+		t.Fatal("a different ingress scope must not compare equal")
+	}
+}

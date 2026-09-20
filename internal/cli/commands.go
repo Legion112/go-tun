@@ -54,7 +54,53 @@ func ExportAmnezia(license, country, out, mmdbPath, format string) error {
 }
 
 // Apply loads prefixes and reconciles kernel state.
-func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tunnelUp, directSNAT bool) error {
+// ApplyOptions carries the apply flags. A struct rather than a growing positional
+// list, now that there are more than a couple of booleans.
+type ApplyOptions struct {
+	PrefixesPath    string
+	Endpoint        string
+	WGConfig        string
+	WGClientsConfig string
+	LANCSV          string
+	TunnelUp        bool
+	DirectSNAT      bool
+	FailMode        policy.FailMode
+	DropIPv6        bool
+	MarkIfaceCSV    string
+	NonRoutableCSV  string
+}
+
+// parsePrefixCSV parses a comma-separated CIDR list.
+func parsePrefixCSV(csv string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range strings.Split(csv, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		pref, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
+		}
+		out = append(out, pref)
+	}
+	return out, nil
+}
+
+func splitCSV(csv string) []string {
+	var out []string
+	for _, part := range strings.Split(csv, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func Apply(o ApplyOptions) error {
+	prefixesPath, endpoint := o.PrefixesPath, o.Endpoint
+	wgConfig, wgClientsConfig, lanCSV := o.WGConfig, o.WGClientsConfig, o.LANCSV
+	tunnelUp, directSNAT := o.TunnelUp, o.DirectSNAT
 	if prefixesPath == "" {
 		return fmt.Errorf("-prefixes is required")
 	}
@@ -113,9 +159,30 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 		Mark:            policy.DefaultMark,
 		Table:           policy.DefaultTableID,
 		RulePriority:    policy.DefaultRulePriority,
-		FailMode:        policy.FailClosed,
 		TunnelUp:        tunnelUp,
 		DirectSNAT:      directSNAT,
+		FailMode:        o.FailMode,
+		DropIPv6:        o.DropIPv6,
+		MarkIIfNames:    splitCSV(o.MarkIfaceCSV),
+	}
+
+	if nr := strings.TrimSpace(o.NonRoutableCSV); nr != "" {
+		extra, err := parsePrefixCSV(nr)
+		if err != nil {
+			return err
+		}
+		p.NonRoutablePrefixes = extra
+	} else {
+		p.NonRoutablePrefixes = policy.DefaultNonRoutable()
+	}
+
+	if len(p.MarkIIfNames) == 0 {
+		fmt.Fprintln(os.Stderr, "gotun apply: -mark-iface is empty, so traffic arriving on ANY interface is classified;"+
+			" on a router pass the client-facing interface(s)")
+	}
+	if p.FailMode == policy.FailOpen {
+		fmt.Fprintln(os.Stderr, "gotun apply: fail-mode=open -- if the tunnel becomes unusable, marked traffic will"+
+			" SILENTLY egress the uplink instead. Check egress identity to detect it.")
 	}
 
 	if wgConfig != "" {
@@ -137,7 +204,11 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 	if err != nil {
 		return err
 	}
-	fmt.Printf("gotun apply: %d changes\n", res.Changes)
+	if sum := res.Summary(); sum != "" {
+		fmt.Printf("gotun apply: %d changes (%s)\n", res.Changes, sum)
+	} else {
+		fmt.Printf("gotun apply: %d changes\n", res.Changes)
+	}
 	return nil
 }
 

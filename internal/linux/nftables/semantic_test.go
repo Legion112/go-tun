@@ -3,6 +3,7 @@ package nftables
 import (
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/legion/go-tun/internal/policy"
@@ -345,5 +346,53 @@ func TestSemanticMatchJSON_SetWithBareHostElements(t *testing.T) {
 ]}`
 	if !semanticMatchJSON(live, spec) {
 		t.Fatal("a set containing bare host addresses must match; otherwise every apply rebuilds the table")
+	}
+}
+
+func ingressMatchSpec(ifaces ...string) policy.NftSpec {
+	return policy.NftSpec{
+		Family: "inet", Table: "gotun",
+		Chains: []policy.NftChainSpec{{
+			Name: "prerouting", Type: "filter", Hook: "prerouting", Priority: -150, Policy: "accept",
+			Rules: []policy.NftRuleSpec{{Description: "only-marked-ingress", IIfNames: ifaces}},
+		}},
+	}
+}
+
+func nftJSONWithIngress(ifaces ...string) string {
+	var rights []string
+	for _, i := range ifaces {
+		rights = append(rights, fmt.Sprintf(`{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"%s"}}`, i))
+	}
+	return `{"nftables":[
+{"chain":{"name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
+{"rule":{"chain":"prerouting","comment":"only-marked-ingress","expr":[` + strings.Join(rights, ",") + `]}}
+]}`
+}
+
+func TestSemanticMatchJSON_IngressGuardMatches(t *testing.T) {
+	if !semanticMatchJSON(nftJSONWithIngress("br-lan"), ingressMatchSpec("br-lan")) {
+		t.Fatal("expected match")
+	}
+}
+
+// Without a real matcher, a renamed interface reads as converged while the guard
+// protects nothing and marking applies to no traffic at all.
+func TestSemanticMatchJSON_IngressGuardStaleInterfaceIsDrift(t *testing.T) {
+	if semanticMatchJSON(nftJSONWithIngress("br-guest"), ingressMatchSpec("br-lan")) {
+		t.Fatal("a guard naming the wrong interface must read as drift")
+	}
+}
+
+func TestSemanticMatchJSON_IngressGuardMissingInterfaceIsDrift(t *testing.T) {
+	if semanticMatchJSON(nftJSONWithIngress("br-lan"), ingressMatchSpec("br-lan", "br-guest")) {
+		t.Fatal("a guard missing one desired interface must read as drift")
+	}
+}
+
+func TestSemanticMatchJSON_IngressGuardAbsentIsDrift(t *testing.T) {
+	if semanticMatchJSON(`{"nftables":[{"chain":{"name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}}]}`,
+		ingressMatchSpec("br-lan")) {
+		t.Fatal("a missing guard must read as drift")
 	}
 }

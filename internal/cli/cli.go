@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/legion/go-tun/internal/policy"
 )
 
 // Run dispatches gotun subcommands.
@@ -60,10 +62,34 @@ func runApply(args []string) error {
 	tunnelUp := fs.String("tunnel-up", "true", "whether tunnel should carry traffic (true|false)")
 	lan := fs.String("lan", "", "LAN CIDR to exclude from marking, for home isolation, and to skip SNAT (comma-separated)")
 	directSNAT := fs.String("direct-snat", "false", "masquerade direct-class traffic out the LAN interface(s) (true|false)")
+	failMode := fs.String("fail-mode", "open",
+		"what happens to marked traffic when the tunnel is unusable: open (fall back to the uplink) or closed (blackhole)")
+	dropIPv6 := fs.String("drop-ipv6", "false",
+		"drop IPv6 and disable it via sysctl (true|false); note clear cannot undo the sysctls")
+	markIface := fs.String("mark-iface", "",
+		"only mark traffic arriving on these interfaces (comma-separated); empty means any, which is unsafe on a router")
+	nonRoutable := fs.String("non-routable", "",
+		"extra destinations never to mark (comma-separated CIDRs); defaults to private, CGNAT, link-local, loopback and multicast space")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return Apply(*prefixesPath, *endpoint, *wgConf, *wgClients, *lan, truthy(*tunnelUp), truthy(*directSNAT))
+	fm, err := policy.ParseFailMode(strings.TrimSpace(*failMode))
+	if err != nil {
+		return err
+	}
+	return Apply(ApplyOptions{
+		PrefixesPath:    *prefixesPath,
+		Endpoint:        *endpoint,
+		WGConfig:        *wgConf,
+		WGClientsConfig: *wgClients,
+		LANCSV:          *lan,
+		TunnelUp:        truthy(*tunnelUp),
+		DirectSNAT:      truthy(*directSNAT),
+		FailMode:        fm,
+		DropIPv6:        truthy(*dropIPv6),
+		MarkIfaceCSV:    *markIface,
+		NonRoutableCSV:  *nonRoutable,
+	})
 }
 
 // truthy parses the string-valued booleans this CLI uses. They are strings

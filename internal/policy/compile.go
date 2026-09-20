@@ -33,6 +33,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	clientsIface := DefaultClientsIface
 
 	excludes := append([]netip.Prefix(nil), p.LANs...)
+	excludes = append(excludes, p.NonRoutablePrefixes...)
 	excludeAddrs := []netip.Addr{}
 	if p.TunnelEndpoint.IsValid() {
 		excludeAddrs = append(excludeAddrs, p.TunnelEndpoint)
@@ -53,19 +54,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Hook:     "prerouting",
 			Priority: -150, // mangle-like
 			Policy:   "accept",
-			Rules: []NftRuleSpec{
-				{
-					Description: "drop-ipv6",
-					DropIPv6:    true,
-				},
-				{
-					Description:     "mark-non-direct",
-					ExcludePrefixes: excludes,
-					ExcludeAddrs:    excludeAddrs,
-					DirectSet:       RuNetsSetName,
-					Mark:            mark,
-				},
-			},
+			Rules:    markRules(p, excludes, excludeAddrs, mark),
 		},
 	}
 
@@ -139,8 +128,6 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	// both have to be zero: "all" alone is not enough.
 	sysctls := []SysctlSpec{
 		{Key: "net.ipv4.ip_forward", Value: "1"},
-		{Key: "net.ipv6.conf.all.disable_ipv6", Value: "1"},
-		{Key: "net.ipv6.conf.default.disable_ipv6", Value: "1"},
 		{Key: "net.ipv4.conf.all.send_redirects", Value: "0"},
 		{Key: "net.ipv4.conf.default.send_redirects", Value: "0"},
 	}
@@ -149,6 +136,14 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Key:   "net.ipv4.conf." + dev + ".send_redirects",
 			Value: "0",
 		})
+	}
+	if p.DropIPv6 {
+		// Only when explicitly asked: Clear cannot undo these, so on a shared
+		// gateway they outlive the deployment that set them.
+		sysctls = append(sysctls,
+			SysctlSpec{Key: "net.ipv6.conf.all.disable_ipv6", Value: "1"},
+			SysctlSpec{Key: "net.ipv6.conf.default.disable_ipv6", Value: "1"},
+		)
 	}
 
 	state := DesiredKernelState{
@@ -190,9 +185,49 @@ func Compile(p Policy) (DesiredKernelState, error) {
 // When the tunnel is up, a lower-metric device route is preferred; if wg-exit
 // disappears without a control-plane reapply, the blackhole remains and
 // marked packets cannot fall through RPDB into main.
+// markRules builds the prerouting rule list. The ingress guard comes first so
+// traffic from interfaces gotun does not steer never even walks the direct set.
+func markRules(p Policy, excludes []netip.Prefix, excludeAddrs []netip.Addr, mark uint32) []NftRuleSpec {
+	var rules []NftRuleSpec
+	if p.DropIPv6 {
+		rules = append(rules, NftRuleSpec{Description: "drop-ipv6", DropIPv6: true})
+	}
+	if len(p.MarkIIfNames) > 0 {
+		rules = append(rules, NftRuleSpec{
+			Description: "only-marked-ingress",
+			IIfNames:    slices.Clone(p.MarkIIfNames),
+		})
+	}
+	rules = append(rules, NftRuleSpec{
+		Description:     "mark-non-direct",
+		ExcludePrefixes: excludes,
+		ExcludeAddrs:    excludeAddrs,
+		DirectSet:       RuNetsSetName,
+		Mark:            mark,
+	})
+	return rules
+}
+
 func routesForTunnel(table int, iface string, tunnelUp bool, mode FailMode) []RouteSpec {
 	dst := netip.MustParsePrefix("0.0.0.0/0")
-	_ = mode // v1: FailClosed only
+	tunnel := RouteSpec{Table: table, Destination: dst, Device: iface, Metric: TunnelRouteMetric}
+
+	if mode == FailOpen {
+		// Nothing but the tunnel route. When it is absent -- withdrawn here, or
+		// dropped by the kernel when the link goes down -- the lookup in this
+		// table misses and the RPDB continues to main.
+		//
+		// Returning an empty slice is only safe because routing.Reconcile treats
+		// every table named by an ip rule as owned, and so still flushes a table
+		// with no desired routes. Without that, a stale blackhole would survive.
+		if !tunnelUp {
+			return nil
+		}
+		return []RouteSpec{tunnel}
+	}
+
+	// Fail-closed: a terminal blackhole always remains, so losing wg-exit without
+	// a control-plane reapply cannot fall through the RPDB into main.
 	bh := RouteSpec{
 		Table:       table,
 		Destination: dst,
@@ -202,10 +237,7 @@ func routesForTunnel(table int, iface string, tunnelUp bool, mode FailMode) []Ro
 	if !tunnelUp {
 		return []RouteSpec{bh}
 	}
-	return []RouteSpec{
-		{Table: table, Destination: dst, Device: iface, Metric: TunnelRouteMetric},
-		bh,
-	}
+	return []RouteSpec{tunnel, bh}
 }
 
 func validate(p Policy) error {
@@ -285,9 +317,11 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 				DropIPv6:        rule.DropIPv6,
 				IIfName:         rule.IIfName,
 				DropDstSet:      rule.DropDstSet,
+				IIfNames:        slices.Clone(rule.IIfNames),
 				OIfNames:        slices.Clone(rule.OIfNames),
 				SNATMasquerade:  rule.SNATMasquerade,
 			}
+			sort.Strings(rules[j].IIfNames)
 			sort.Strings(rules[j].OIfNames)
 			sort.Slice(rules[j].ExcludePrefixes, func(a, b int) bool {
 				return rules[j].ExcludePrefixes[a].String() < rules[j].ExcludePrefixes[b].String()

@@ -137,6 +137,25 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 			}
 		}
 		return false
+	case want.Description == "only-marked-ingress":
+		// Compare the interface set exactly. The default comment-counting branch
+		// would accept a guard naming a renamed or removed interface, report
+		// convergence, and leave marking applying to nothing at all.
+		wantIf := map[string]struct{}{}
+		for _, n := range want.IIfNames {
+			wantIf[n] = struct{}{}
+		}
+		for _, r := range rules {
+			if r.Chain != chain || r.Comment != "only-marked-ingress" {
+				continue
+			}
+			haveIf := map[string]struct{}{}
+			for _, n := range r.IIfNames {
+				haveIf[n] = struct{}{}
+			}
+			return stringSetsEqual(haveIf, wantIf)
+		}
+		return false
 	case want.Description == "snat-direct":
 		// The default comment-counting branch is not good enough here: it would
 		// accept a rule pointing at the wrong interface, or guarded by stale LAN
@@ -713,6 +732,18 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 				lines = append(lines, fmt.Sprintf(`ip daddr %s counter return comment "exclude-endpoint"`, a.String()))
 			}
 			lines = append(lines, fmt.Sprintf(`ip daddr != @%s meta mark set 0x%x comment "mark-non-direct"`, rule.DirectSet, rule.Mark))
+		case rule.Description == "only-marked-ingress":
+			// Return early for any interface gotun does not steer, so WAN-inbound
+			// traffic never reaches the mark rule or walks the direct set.
+			if len(rule.IIfNames) == 0 {
+				break
+			}
+			quoted := make([]string, 0, len(rule.IIfNames))
+			for _, n := range rule.IIfNames {
+				quoted = append(quoted, fmt.Sprintf("%q", n))
+			}
+			lines = append(lines, fmt.Sprintf(`iifname != { %s } return comment "only-marked-ingress"`,
+				strings.Join(quoted, ", ")))
 		case rule.Description == "snat-direct":
 			for _, pfx := range rule.ExcludePrefixes {
 				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "snat-skip-lan"`, pfx.String()))
