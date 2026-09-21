@@ -32,44 +32,72 @@ func TestRenderFullTable_BatchesElements(t *testing.T) {
 	}
 }
 
+// TestLargeRUSet_CompileAndRender runs the real RU extract, both families, at
+// full size. The IPv6 half roughly doubles the element count on the wire, and
+// its prefixes are about three times longer as text, so the batching maths and
+// the script size are worth measuring rather than assuming.
 func TestLargeRUSet_CompileAndRender(t *testing.T) {
-	// IPv4 only for now; the dual-stack large-set test arrives with the
-	// family-aware compiler.
-	prefs := testutil.LoadRUv4FromMMDB(t)
+	prefs := testutil.LoadAllRUfromMMDB(t)
+	var v4, v6 []netip.Prefix
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			v4 = append(v4, p)
+		} else {
+			v6 = append(v6, p)
+		}
+	}
 
 	start := time.Now()
 	st, err := policy.Compile(policy.Policy{
 		DirectPrefixes:  prefs,
 		TunnelInterface: "wg-exit",
-		TunnelEndpoints:  []netip.Addr{netip.MustParseAddr("10.20.0.3")},
-		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
-		FailMode:        policy.FailClosed,
-		TunnelUp:        false,
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.20.0.3")},
+		LANs: []netip.Prefix{
+			netip.MustParsePrefix("10.10.0.0/24"),
+			netip.MustParsePrefix("fd00:10::/64"),
+		},
+		FailMode:          policy.FailClosed,
+		TunnelUp:          false,
+		TunnelCarriesIPv6: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Nft.Sets) != 1 || len(st.Nft.Sets[0].Elements) != len(prefs) {
-		t.Fatalf("compile elements: got %d want %d", len(st.Nft.Sets[0].Elements), len(prefs))
+	if len(st.Nft.Sets) != 2 {
+		t.Fatalf("want one set per family, got %d", len(st.Nft.Sets))
+	}
+	bySet := map[string]policy.NftSetSpec{}
+	for _, set := range st.Nft.Sets {
+		bySet[set.Name] = set
+	}
+	if got := bySet[policy.RuNetsSetName]; len(got.Elements) != len(v4) || got.Type != "ipv4_addr" {
+		t.Fatalf("ru_nets: %d elements type %q, want %d ipv4_addr", len(got.Elements), got.Type, len(v4))
+	}
+	if got := bySet[policy.RuNetsSetNameV6]; len(got.Elements) != len(v6) || got.Type != "ipv6_addr" {
+		t.Fatalf("ru_nets6: %d elements type %q, want %d ipv6_addr", len(got.Elements), got.Type, len(v6))
 	}
 
 	renderStart := time.Now()
 	script := nftables.RenderFullTable(st.Nft)
 	renderDur := time.Since(renderStart)
 
-	if !strings.Contains(script, "ru_nets") {
-		t.Fatal("script missing ru_nets")
+	for _, want := range []string{"ru_nets", "ru_nets6", "type ipv6_addr", "ip6 daddr"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q", want)
+		}
 	}
 	batches := strings.Count(script, "add element")
-	wantBatches := (len(prefs) + nftables.ElementBatchSize - 1) / nftables.ElementBatchSize
-	if batches != wantBatches {
-		t.Fatalf("add element batches: got %d want %d", batches, wantBatches)
+	batchesFor := func(n int) int {
+		return (n + nftables.ElementBatchSize - 1) / nftables.ElementBatchSize
+	}
+	if want := batchesFor(len(v4)) + batchesFor(len(v6)); batches != want {
+		t.Fatalf("add element batches: got %d want %d", batches, want)
 	}
 	if len(script) < 1000 {
 		t.Fatalf("script unexpectedly small: %d bytes", len(script))
 	}
-	t.Logf("RU prefixes=%d compile+checks=%s render=%s script=%d bytes batches=%d",
-		len(prefs), time.Since(start), renderDur, len(script), batches)
+	t.Logf("RU prefixes=%d (v4=%d v6=%d) compile+checks=%s render=%s script=%d bytes batches=%d",
+		len(prefs), len(v4), len(v6), time.Since(start), renderDur, len(script), batches)
 }
 
 func snatSpec(lans []string, oifs []string) policy.NftSpec {
@@ -126,7 +154,7 @@ func TestRenderFullTable_EveryCompiledRuleRenders(t *testing.T) {
 	p := policy.Policy{
 		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
 		TunnelInterface: "wg-exit",
-		TunnelEndpoints:  []netip.Addr{netip.MustParseAddr("10.10.0.2")},
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.10.0.2")},
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		LANIfaces:       []string{"eth0"},
 		Mark:            policy.DefaultMark,
