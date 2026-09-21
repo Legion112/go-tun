@@ -25,6 +25,14 @@ func TestLargeRUSet_DockerNftApply(t *testing.T) {
 		t.Skip("set GOTUN_LARGE_SET=1 to run (make test-large-set)")
 	}
 	prefs := testutil.LoadAllRUfromMMDB(t)
+	var v4, v6 int
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			v4++
+		} else {
+			v6++
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -40,10 +48,14 @@ func TestLargeRUSet_DockerNftApply(t *testing.T) {
 	st, err := policy.Compile(policy.Policy{
 		DirectPrefixes:  prefs,
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.20.0.3"),
-		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
-		FailMode:        policy.FailClosed,
-		TunnelUp:        false,
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.20.0.3")},
+		LANs: []netip.Prefix{
+			netip.MustParsePrefix("10.10.0.0/24"),
+			netip.MustParsePrefix("fd00:10::/64"),
+		},
+		FailMode:          policy.FailClosed,
+		TunnelUp:          false,
+		TunnelCarriesIPv6: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,9 +68,14 @@ func TestLargeRUSet_DockerNftApply(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Both sets go in through one nft -f, which is how the gateway loads them:
+	// a single transaction, so the two families can never be half-applied.
+	// Listing both back is what catches an IPv6 interval set the kernel
+	// accepted but stored differently.
 	inner := `set -e
 nft -f /work/gotun.nft
 nft -j list set inet gotun ru_nets
+nft -j list set inet gotun ru_nets6
 `
 	start := time.Now()
 	stdout, stderr, err := harness.RunOneShot(ctx, harness.OneShot{
@@ -73,14 +90,47 @@ nft -j list set inet gotun ru_nets
 	}
 	elapsed := time.Since(start)
 
-	n, err := countElemsFromDockerJSON([]byte(stdout))
+	// Two JSON documents come back, one per list command; count each.
+	parts := splitJSONDocs(stdout)
+	if len(parts) != 2 {
+		t.Fatalf("want two set listings, got %d\nout=%s", len(parts), truncate(stdout, 2000))
+	}
+	got4, err := countElemsFromDockerJSON([]byte(parts[0]))
 	if err != nil {
-		t.Fatalf("parse nft json: %v\nout=%s", err, truncate(stdout, 2000))
+		t.Fatalf("parse ru_nets json: %v\nout=%s", err, truncate(parts[0], 2000))
 	}
-	if n != len(prefs) {
-		t.Fatalf("nft set elements: got %d want %d", n, len(prefs))
+	got6, err := countElemsFromDockerJSON([]byte(parts[1]))
+	if err != nil {
+		t.Fatalf("parse ru_nets6 json: %v\nout=%s", err, truncate(parts[1], 2000))
 	}
-	t.Logf("loaded %d RU prefixes into nft in %s (script %d bytes)", n, elapsed, len(script))
+	if got4 != v4 || got6 != v6 {
+		t.Fatalf("nft set elements: got v4=%d v6=%d want v4=%d v6=%d", got4, got6, v4, v6)
+	}
+	t.Logf("loaded %d RU prefixes (v4=%d v6=%d) into nft in %s (script %d bytes)",
+		len(prefs), got4, got6, elapsed, len(script))
+}
+
+// splitJSONDocs separates the concatenated top-level objects nft prints when
+// several list commands run in one shell.
+func splitJSONDocs(out string) []string {
+	var docs []string
+	depth, start := 0, -1
+	for i, c := range out {
+		switch c {
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			depth--
+			if depth == 0 && start >= 0 {
+				docs = append(docs, out[start:i+1])
+				start = -1
+			}
+		}
+	}
+	return docs
 }
 
 func countElemsFromDockerJSON(out []byte) (int, error) {

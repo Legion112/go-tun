@@ -66,15 +66,33 @@ func NewLab(ctx context.Context, prefix string) (*Lab, error) {
 
 func (l *Lab) name(s string) string { return l.Prefix + "-" + s }
 
+// NetOpts configures optional network properties. The zero value is IPv4-only,
+// which is what every existing lab wants.
+type NetOpts struct {
+	// Subnet6 is a ULA subnet such as "fd00:10::/64". Empty leaves the network
+	// IPv4-only.
+	Subnet6 string
+}
+
 // CreateNetwork creates an internal bridge network (no host networking).
-func (l *Lab) CreateNetwork(ctx context.Context, name, subnet string) error {
+//
+// The options are variadic so the seventeen existing IPv4 call sites keep both
+// their spelling and their exact behaviour: EnableIPv6 stays nil rather than
+// becoming an explicit false, so the request Docker receives is unchanged.
+func (l *Lab) CreateNetwork(ctx context.Context, name, subnet string, opts ...NetOpts) error {
 	n := l.name(name)
+	cfg := []network.IPAMConfig{{Subnet: subnet}}
+	var enable6 *bool
+	if len(opts) > 0 && opts[0].Subnet6 != "" {
+		cfg = append(cfg, network.IPAMConfig{Subnet: opts[0].Subnet6})
+		yes := true
+		enable6 = &yes
+	}
 	_, err := l.cli.NetworkCreate(ctx, n, network.CreateOptions{
-		Driver:   "bridge",
-		Internal: true,
-		IPAM: &network.IPAM{
-			Config: []network.IPAMConfig{{Subnet: subnet}},
-		},
+		Driver:     "bridge",
+		Internal:   true,
+		EnableIPv6: enable6,
+		IPAM:       &network.IPAM{Config: cfg},
 	})
 	if err != nil {
 		return err
@@ -87,6 +105,14 @@ func (l *Lab) CreateNetwork(ctx context.Context, name, subnet string) error {
 type RunOpts struct {
 	Entrypoint []string // nil → ["sleep"]
 	Cmd        []string // nil → ["infinity"] when Entrypoint is nil
+	// IP6 is the IPv6 address on the primary network. A non-empty value is
+	// what enables IPv6 in the container -- there is deliberately no separate
+	// boolean, because setting one without the other produces either a
+	// container with IPv6 disabled and a v6 address Docker cannot assign, or a
+	// silently v4-only node in a test that believes it is dual-stack.
+	IP6 string
+	// Extra6 maps an extraNetworks name to this container's IPv6 address there.
+	Extra6 map[string]string
 }
 
 // RunContainer starts a privileged container with NET_ADMIN on the given network.
@@ -96,6 +122,8 @@ func (l *Lab) RunContainer(ctx context.Context, name, image, ip, netName string,
 
 	entrypoint := []string{"sleep"}
 	cmd := []string{"infinity"}
+	var ip6 string
+	extra6 := map[string]string{}
 	if len(opts) > 0 {
 		if opts[0].Entrypoint != nil {
 			entrypoint = opts[0].Entrypoint
@@ -103,6 +131,29 @@ func (l *Lab) RunContainer(ctx context.Context, name, image, ip, netName string,
 		} else if opts[0].Cmd != nil {
 			cmd = opts[0].Cmd
 		}
+		ip6 = opts[0].IP6
+		if opts[0].Extra6 != nil {
+			extra6 = opts[0].Extra6
+		}
+	}
+
+	// IPv6 is disabled outright unless this node is meant to have it. The two
+	// settings are mutually exclusive in practice: Docker applies sysctls
+	// before configuring the endpoint, so disable_ipv6=1 makes assigning a
+	// static v6 address fail.
+	//
+	// accept_dad=0 is not tuning. A freshly assigned IPv6 address stays
+	// tentative for about a second while duplicate address detection runs, and
+	// binding to a tentative address fails with EADDRNOTAVAIL -- a pure
+	// timing flake that would get blamed on IPv6 rather than on the lab.
+	sysctls := map[string]string{"net.ipv4.ip_forward": "1"}
+	if ip6 != "" {
+		sysctls["net.ipv6.conf.all.forwarding"] = "1"
+		sysctls["net.ipv6.conf.all.accept_dad"] = "0"
+		sysctls["net.ipv6.conf.default.accept_dad"] = "0"
+	} else {
+		sysctls["net.ipv6.conf.all.disable_ipv6"] = "1"
+		sysctls["net.ipv6.conf.default.disable_ipv6"] = "1"
 	}
 
 	resp, err := l.cli.ContainerCreate(ctx,
@@ -112,19 +163,15 @@ func (l *Lab) RunContainer(ctx context.Context, name, image, ip, netName string,
 			Cmd:        cmd,
 		},
 		&container.HostConfig{
-			Privileged: true,
-			AutoRemove: true,
-			Sysctls: map[string]string{
-				"net.ipv4.ip_forward":                "1",
-				"net.ipv6.conf.all.disable_ipv6":     "1",
-				"net.ipv6.conf.default.disable_ipv6": "1",
-			},
+			Privileged:  true,
+			AutoRemove:  true,
+			Sysctls:     sysctls,
 			NetworkMode: container.NetworkMode(primaryNet),
 		},
 		&network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{
 				primaryNet: {
-					IPAMConfig: &network.EndpointIPAMConfig{IPv4Address: ip},
+					IPAMConfig: &network.EndpointIPAMConfig{IPv4Address: ip, IPv6Address: ip6},
 				},
 			},
 		},
@@ -141,13 +188,61 @@ func (l *Lab) RunContainer(ctx context.Context, name, image, ip, netName string,
 	l.Containers = append(l.Containers, cname)
 
 	for net, addr := range extraNetworks {
-		err := l.cli.NetworkConnect(ctx, l.name(net), cname, &network.EndpointSettings{
-			IPAMConfig: &network.EndpointIPAMConfig{IPv4Address: addr},
-		})
+		ipam := &network.EndpointIPAMConfig{IPv4Address: addr}
+		if a6 := extra6[net]; a6 != "" {
+			ipam.IPv6Address = a6
+		}
+		err := l.cli.NetworkConnect(ctx, l.name(net), cname, &network.EndpointSettings{IPAMConfig: ipam})
 		if err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// WaitReadyV6 waits until addr is present, global-scope and out of duplicate
+// address detection. Without it the IPv6 labs flake on DAD and the blame lands
+// on IPv6 rather than on the harness.
+func (l *Lab) WaitReadyV6(ctx context.Context, name, addr string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := l.Exec(ctx, name, "ip", "-o", "-6", "addr", "show", "scope", "global")
+		if err == nil {
+			last = out
+			if strings.Contains(out, addr) && !strings.Contains(out, "tentative") {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("%s: %s never became usable; last listing: %s", name, addr, last)
+}
+
+// SupportsIPv6Networks reports whether this daemon can create an internal IPv6
+// network, so a machine without ip6tables says so up front rather than failing
+// somewhere deep inside a topology.
+func SupportsIPv6Networks(ctx context.Context) error {
+	cli, err := newDockerClient()
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	name := fmt.Sprintf("gotun-v6probe-%d", time.Now().UnixNano()%1_000_000)
+	yes := true
+	_, err = cli.NetworkCreate(ctx, name, network.CreateOptions{
+		Driver:     "bridge",
+		Internal:   true,
+		EnableIPv6: &yes,
+		IPAM: &network.IPAM{Config: []network.IPAMConfig{
+			{Subnet: "10.254.254.0/24"},
+			{Subnet: "fd00:dead:beef::/64"},
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("this docker daemon cannot create an internal IPv6 network: %w", err)
+	}
+	_ = cli.NetworkRemove(ctx, name)
 	return nil
 }
 

@@ -31,7 +31,7 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		// Fail-closed: remove AllowedIPs routes and bring interface down.
 		for _, p := range spec.Peer.AllowedIPs {
 			if p.IsValid() {
-				_, _ = r.Run("ip", "route", "del", p.String(), "dev", iface)
+				_, _ = r.Run("ip", famFlag(p.Addr()), "route", "del", p.String(), "dev", iface)
 			}
 		}
 		if _, err := r.Run("ip", "link", "set", "dev", iface, "down"); err != nil {
@@ -79,8 +79,12 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		changes++
 	}
 
-	if spec.Address.IsValid() {
-		if _, err := r.Run("ip", "address", "replace", spec.Address.String(), "dev", iface); err != nil {
+	for _, addr := range spec.Addresses {
+		if !addr.IsValid() {
+			continue
+		}
+		// No family flag: iproute2 infers it from the address itself.
+		if _, err := r.Run("ip", "address", "replace", addr.String(), "dev", iface); err != nil {
 			return changes, err
 		}
 		changes++
@@ -97,6 +101,20 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 	return changes + n, nil
 }
 
+// famFlag is the explicit iproute2 family selector.
+//
+// Passed on every ip route/rule invocation, including IPv4 ones. Relying on the
+// default family is what made the read below IPv4-only while the write it
+// guarded was not: an IPv6 AllowedIP was never found in "ip route show dev X",
+// so it was reinstalled on every apply and counted as a change, and the gateway
+// never reported convergence.
+func famFlag(a netip.Addr) string {
+	if a.Is4() {
+		return "-4"
+	}
+	return "-6"
+}
+
 func ensureAllowedIPRoutes(r linux.Runner, iface string, allowed []netip.Prefix) (int, error) {
 	// Ensure AllowedIPs appear as routes (some environments suppress WG auto-routes).
 	// Skip default routes: policy routing (fwmark → table 100) owns the default via
@@ -106,20 +124,25 @@ func ensureAllowedIPRoutes(r linux.Runner, iface string, allowed []netip.Prefix)
 	// to keep running even when the peer config matches semantically, because a
 	// bounce can drop these routes -- but reporting a change for a route that was
 	// already correct makes every apply look non-convergent and hides real drift.
+	//
+	// The listing is cached per family, because "ip route show" answers for one
+	// family only. One shared cache would compare IPv6 prefixes against the IPv4
+	// table and never find them.
 	changes := 0
-	var existing string
+	existing := map[string]string{}
 	for _, p := range allowed {
 		if !p.IsValid() || isDefaultRoute(p) {
 			continue
 		}
-		if existing == "" {
+		fam := famFlag(p.Addr())
+		if _, ok := existing[fam]; !ok {
 			// Lazily, so a peer with only default AllowedIPs costs nothing.
-			existing, _ = r.Run("ip", "route", "show", "dev", iface)
+			existing[fam], _ = r.Run("ip", fam, "route", "show", "dev", iface)
 		}
-		if routeExists(existing, p) {
+		if routeExists(existing[fam], p) {
 			continue
 		}
-		if _, err := r.Run("ip", "route", "replace", p.String(), "dev", iface); err != nil {
+		if _, err := r.Run("ip", fam, "route", "replace", p.String(), "dev", iface); err != nil {
 			return changes, err
 		}
 		changes++
@@ -166,7 +189,7 @@ func parseRouteDest(field string) (netip.Prefix, bool) {
 }
 
 func isDefaultRoute(p netip.Prefix) bool {
-	return (p.Addr().Is4() && p.Bits() == 0) || (p.Addr().Is6() && p.Bits() == 0)
+	return p.Bits() == 0
 }
 
 func semanticMatch(r linux.Runner, iface, link string, spec policy.WireGuardSpec) bool {
@@ -208,11 +231,23 @@ func semanticMatch(r linux.Runner, iface, link string, spec policy.WireGuardSpec
 			return false
 		}
 	}
-	if spec.Address.IsValid() {
-		addrOut, err := r.Run("ip", "-4", "addr", "show", "dev", iface)
-		if err != nil || !strings.Contains(addrOut, spec.Address.String()) {
+	if len(spec.Addresses) > 0 {
+		// No -4: one listing covers both families, and a dual-stack tunnel
+		// needs both checked. Only the desired addresses have to be present,
+		// so the link-local address every IPv6 interface carries is ignored.
+		addrOut, err := r.Run("ip", "addr", "show", "dev", iface)
+		if err != nil {
+			return false
+		}
+		for _, addr := range spec.Addresses {
+			if !addr.IsValid() {
+				continue
+			}
+			if strings.Contains(addrOut, addr.String()) {
+				continue
+			}
 			// Also accept "inet 10.99.0.1/30" style without requiring exact Prefix.String()
-			if err != nil || !addrContainsPrefix(addrOut, spec.Address) {
+			if !addrContainsPrefix(addrOut, addr) {
 				return false
 			}
 		}

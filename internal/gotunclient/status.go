@@ -36,6 +36,14 @@ type StatusReport struct {
 	// file. Reporting "not enabled" in that case would be a lie.
 	StateErr error
 	Gateway  netip.Addr
+
+	// The IPv6 half. HasIPv6 says the host has an IPv6 default route at all,
+	// which is what makes "not tunneled" worth reporting rather than noise.
+	HasIPv6      bool
+	DefaultVia6  netip.Addr
+	DefaultDev6  string
+	Defaults6All string
+	DNS6         []string
 }
 
 // Status collects the current picture without mutating anything.
@@ -70,10 +78,21 @@ func Status(r linux.Runner, statePath string, gw netip.Addr, extraLANs []netip.P
 		rep.DNS = dns
 	}
 
+	if dns6, err := DeviceDNS6(r, conn.Device); err == nil {
+		rep.DNS6 = dns6
+	}
+
 	if out, err := r.Run("ip", "-4", "route", "show", "default"); err == nil {
 		rep.DefaultsAll = strings.TrimSpace(out)
 		if res, perr := parseRouteGet(out); perr == nil {
 			rep.DefaultVia, rep.DefaultDev = res.Via, res.Dev
+		}
+	}
+	if out, err := r.Run("ip", "-6", "route", "show", "default"); err == nil {
+		rep.Defaults6All = strings.TrimSpace(out)
+		rep.HasIPv6 = len(defaultRouteDevices(out)) > 0
+		if res, perr := parseRouteGet(out); perr == nil {
+			rep.DefaultVia6, rep.DefaultDev6 = res.Via, res.Dev
 		}
 	}
 
@@ -109,14 +128,32 @@ func PrintStatus(w io.Writer, s StatusReport) {
 		fmt.Fprintf(tw, "default:\t%s\n", orNone(s.DefaultsAll))
 	}
 	fmt.Fprintf(tw, "dns:\t%s\n", orNone(strings.Join(s.DNS, ", ")))
+	if s.DefaultVia6.IsValid() {
+		fmt.Fprintf(tw, "default6:\tvia %s dev %s\n", s.DefaultVia6, s.DefaultDev6)
+	} else {
+		fmt.Fprintf(tw, "default6:\t%s\n", orNone(s.Defaults6All))
+	}
+	if len(s.DNS6) > 0 {
+		fmt.Fprintf(tw, "dns6:\t%s\n", strings.Join(s.DNS6, ", "))
+	}
 	switch {
 	case s.Enabled && s.State != nil:
 		confirmed := "ARMED (not confirmed)"
 		if s.State.Confirmed {
 			confirmed = "confirmed"
 		}
-		fmt.Fprintf(tw, "gotun:\tENABLED gateway=%s dns=%s mode=%s %s\n",
-			s.State.EnabledGateway, s.State.EnabledDNS, s.State.Mode, confirmed)
+		gw6 := "(not managed)"
+		if s.State.EnabledGateway6 != "" {
+			gw6 = s.State.EnabledGateway6
+		}
+		fmt.Fprintf(tw, "gotun:\tENABLED gateway=%s gateway6=%s dns=%s mode=%s %s\n",
+			s.State.EnabledGateway, gw6, s.State.EnabledDNS, s.State.Mode, confirmed)
+		// The only place an IPv6 leak becomes visible after the fact. Clients
+		// prefer IPv6 when both families resolve, so an unmanaged IPv6 default
+		// is not a corner case -- it is most of the traffic.
+		if s.HasIPv6 && !s.State.IPv6Managed {
+			fmt.Fprintf(tw, "ipv6:\tNOT TUNNELED -- IPv6 traffic egresses the ISP directly\n")
+		}
 		fmt.Fprintf(tw, "state:\t%s (saved %s)\n", s.StatePath, s.State.SavedAt.Format("2006-01-02T15:04:05Z"))
 	case s.Enabled:
 		fmt.Fprintf(tw, "gotun:\tENABLED (state file present but unreadable -- run as root for details)\n")

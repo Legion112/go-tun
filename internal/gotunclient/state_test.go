@@ -2,6 +2,7 @@ package gotunclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,5 +109,74 @@ func TestStateExists(t *testing.T) {
 	SaveState(p, &State{Version: StateVersion, ConnectionID: "c"})
 	if !StateExists(p) {
 		t.Fatal("should exist now")
+	}
+}
+
+// TestLoadState_AcceptsVersion1 is the other half of the migration guarantee:
+// a machine enabled under the pre-IPv6 binary must still be disable-able by
+// this one. Rejecting the old version would strand the user's original
+// NetworkManager settings inside a file the new binary refuses to read.
+func TestLoadState_AcceptsVersion1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	v1 := `{
+  "version": 1,
+  "connection_id": "MTS_GPON_2F34",
+  "device": "wlan0",
+  "saved": {"method": "auto", "ipv6_ignore_auto_dns": false},
+  "enabled_gateway": "192.168.8.162"
+}`
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("a version 1 state file must still load: %v", err)
+	}
+	if st.Saved.IPv6 != nil {
+		t.Fatal("a pre-IPv6 snapshot must leave IPv6 nil, or disable would clear properties it never captured")
+	}
+	if st.IPv6Managed {
+		t.Fatal("a pre-IPv6 enable never managed IPv6")
+	}
+}
+
+// TestLoadState_RejectsFutureVersion keeps the upper bound meaningful.
+func TestLoadState_RejectsFutureVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	future := fmt.Sprintf(`{"version": %d, "connection_id": "x"}`, StateVersion+1)
+	if err := os.WriteFile(path, []byte(future), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(path); err == nil {
+		t.Fatal("a newer state file must not be silently accepted")
+	}
+}
+
+// TestSaveLoadState_IPv6RoundTrip keeps the new block on disk.
+func TestSaveLoadState_IPv6RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	routes := "::/0 fd00:8::162"
+	in := &State{
+		Version:         StateVersion,
+		ConnectionID:    "conn",
+		EnabledGateway6: "fd00:8::162",
+		IPv6Managed:     true,
+		Saved: NMProps{
+			Method: "auto",
+			IPv6:   &NMPropsV6{Method: "auto", NeverDefault: true, Routes: &routes},
+		},
+	}
+	if err := SaveState(path, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Saved.IPv6 == nil || !got.Saved.IPv6.NeverDefault || got.Saved.IPv6.Routes == nil {
+		t.Fatalf("IPv6 snapshot did not round trip: %+v", got.Saved.IPv6)
+	}
+	if *got.Saved.IPv6.Routes != routes || !got.IPv6Managed {
+		t.Fatalf("IPv6 snapshot changed in transit: %+v", got.Saved.IPv6)
 	}
 }

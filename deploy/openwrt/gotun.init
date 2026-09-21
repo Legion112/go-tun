@@ -36,7 +36,9 @@ start() {
 		-lan "$GOTUN_LAN" \
 		-mark-iface "$GOTUN_MARK_IFACE" \
 		-tunnel-up "${GOTUN_TUNNEL_UP:-true}" \
-		-fail-mode "${GOTUN_FAIL_MODE:-open}"
+		-fail-mode "${GOTUN_FAIL_MODE:-open}" \
+		-ipv6 "${GOTUN_IPV6:-auto}" \
+		-ipv6-fallback "${GOTUN_IPV6_FALLBACK:-direct}"
 }
 
 stop() {

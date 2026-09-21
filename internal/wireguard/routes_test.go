@@ -48,7 +48,7 @@ func TestRouteExists_EmptyOutput(t *testing.T) {
 // apply, so a converged gateway never reported 0 changes.
 func TestEnsureAllowedIPRoutes_PresentRouteIsNotCounted(t *testing.T) {
 	r := linux.NewRecordingRunner()
-	r.Outputs["ip route show dev wg-exit"] = "10.67.0.0/24 dev wg-exit scope link\n"
+	r.Outputs["ip -4 route show dev wg-exit"] = "10.67.0.0/24 dev wg-exit scope link\n"
 	n, err := ensureAllowedIPRoutes(r, "wg-exit", []netip.Prefix{
 		netip.MustParsePrefix("10.67.0.0/24"),
 		netip.MustParsePrefix("0.0.0.0/0"),
@@ -66,7 +66,7 @@ func TestEnsureAllowedIPRoutes_PresentRouteIsNotCounted(t *testing.T) {
 
 func TestEnsureAllowedIPRoutes_MissingRouteIsInstalledAndCounted(t *testing.T) {
 	r := linux.NewRecordingRunner()
-	r.Outputs["ip route show dev wg-exit"] = "\n"
+	r.Outputs["ip -4 route show dev wg-exit"] = "\n"
 	n, err := ensureAllowedIPRoutes(r, "wg-exit", []netip.Prefix{netip.MustParsePrefix("10.67.0.0/24")})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestEnsureAllowedIPRoutes_MissingRouteIsInstalledAndCounted(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("a missing route must be installed and counted, got %d", n)
 	}
-	if !strings.Contains(strings.Join(r.Calls, "\n"), "ip route replace 10.67.0.0/24 dev wg-exit") {
+	if !strings.Contains(strings.Join(r.Calls, "\n"), "ip -4 route replace 10.67.0.0/24 dev wg-exit") {
 		t.Fatalf("expected the replace:\n%s", strings.Join(r.Calls, "\n"))
 	}
 }
@@ -83,7 +83,7 @@ func TestEnsureAllowedIPRoutes_MissingRouteIsInstalledAndCounted(t *testing.T) {
 // check still runs, only the accounting changed.
 func TestEnsureAllowedIPRoutes_PartiallyMissingInstallsOnlyTheMissing(t *testing.T) {
 	r := linux.NewRecordingRunner()
-	r.Outputs["ip route show dev wg-exit"] = "10.67.0.0/24 dev wg-exit scope link\n"
+	r.Outputs["ip -4 route show dev wg-exit"] = "10.67.0.0/24 dev wg-exit scope link\n"
 	n, err := ensureAllowedIPRoutes(r, "wg-exit", []netip.Prefix{
 		netip.MustParsePrefix("10.67.0.0/24"),
 		netip.MustParsePrefix("10.99.0.0/30"),
@@ -95,10 +95,10 @@ func TestEnsureAllowedIPRoutes_PartiallyMissingInstallsOnlyTheMissing(t *testing
 		t.Fatalf("only the missing route should count, got %d", n)
 	}
 	joined := strings.Join(r.Calls, "\n")
-	if !strings.Contains(joined, "ip route replace 10.99.0.0/30 dev wg-exit") {
+	if !strings.Contains(joined, "ip -4 route replace 10.99.0.0/30 dev wg-exit") {
 		t.Fatalf("missing route not installed:\n%s", joined)
 	}
-	if strings.Contains(joined, "ip route replace 10.67.0.0/24") {
+	if strings.Contains(joined, "ip -4 route replace 10.67.0.0/24") {
 		t.Fatalf("present route should be left alone:\n%s", joined)
 	}
 }

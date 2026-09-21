@@ -60,7 +60,7 @@ func FetchGeoLite2CountryCSV(licenseKey, countryISO, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return WriteCIDRList(outPath, CollapseIPv4(prefs))
+	return WriteCIDRList(outPath, Collapse(prefs))
 }
 
 func download(url, dest string) error {

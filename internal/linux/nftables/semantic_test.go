@@ -396,3 +396,50 @@ func TestSemanticMatchJSON_IngressGuardAbsentIsDrift(t *testing.T) {
 		t.Fatal("a missing guard must read as drift")
 	}
 }
+
+// TestParseRuleJSON_SetReferenceIsNotADAddr pins a defect the dual-stack
+// round-trip test uncovered: nft renders "ip daddr @home_nets" as a daddr match
+// whose right-hand side is the string "@home_nets". The JSON parser filed that
+// under DAddrs while liveHasRule looks for it in SetNames, so
+// isolate-inbound-from-home never matched on a box with JSON support -- for
+// either family -- and the forward chain was rebuilt on every apply. The text
+// parser has always made this distinction; this keeps the two in step.
+func TestParseRuleJSON_SetReferenceIsNotADAddr(t *testing.T) {
+	const out = `{"nftables":[
+{"table":{"family":"inet","name":"gotun"}},
+{"chain":{"family":"inet","table":"gotun","name":"forward","type":"filter","hook":"forward","prio":0,"policy":"accept"}},
+{"rule":{"family":"inet","table":"gotun","chain":"forward","comment":"isolate-inbound-from-home","expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"wg-clients"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"@home_nets"}},{"drop":null}]}}
+]}`
+	live, err := parseNftJSON(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live.rules) != 1 {
+		t.Fatalf("want one rule, got %d", len(live.rules))
+	}
+	r := live.rules[0]
+	if !containsStr(r.SetNames, "home_nets") {
+		t.Fatalf("set reference must land in SetNames, got %v", r.SetNames)
+	}
+	for _, d := range r.DAddrs {
+		if strings.HasPrefix(d, "@") {
+			t.Fatalf("a set reference must not be read as a daddr, got %v", r.DAddrs)
+		}
+	}
+}
+
+// TestIsIPDAddrPayload_AcceptsIP6 pins the one-line change that makes IPv6
+// visible to the JSON parser at all. Requiring protocol=="ip" made every IPv6
+// exclude rule read as empty, so the spec never matched and the whole table --
+// ~17k elements once IPv6 prefixes are loaded -- was rebuilt on every apply.
+func TestIsIPDAddrPayload_AcceptsIP6(t *testing.T) {
+	for _, proto := range []string{"ip", "ip6"} {
+		raw := []byte(`{"payload":{"protocol":"` + proto + `","field":"daddr"}}`)
+		if !isIPDAddrPayload(raw) {
+			t.Fatalf("%s daddr payload must be recognised", proto)
+		}
+	}
+	if isIPDAddrPayload([]byte(`{"payload":{"protocol":"ip6","field":"saddr"}}`)) {
+		t.Fatal("a saddr match is not a destination match")
+	}
+}

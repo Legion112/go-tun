@@ -1,6 +1,7 @@
 package gotunclient
 
 import (
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -277,9 +278,136 @@ func TestMergePrefixes_DedupesAndMasks(t *testing.T) {
 	}
 }
 
-func TestMergePrefixes_SkipsIPv6(t *testing.T) {
-	got := MergePrefixes(nil, mustPrefix(t, "2001:db8::/32"), mustPrefix(t, "10.0.0.0/8"))
-	if len(got) != 1 || got[0].String() != "10.0.0.0/8" {
-		t.Fatalf("got %v", got)
+// TestMergePrefixes_KeepsIPv6 is the inverse of what this used to assert. The
+// protected set is what must stay on-link, and once the client points ::/0 at
+// the gateway, an IPv6 LAN prefix needs protecting for exactly the reason an
+// IPv4 one does.
+func TestMergePrefixes_KeepsIPv6(t *testing.T) {
+	got := MergePrefixes(nil,
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+	)
+	if len(got) != 2 {
+		t.Fatalf("both families must survive, got %v", got)
+	}
+	if got[0].String() != "2001:db8::/32" || got[1].String() != "10.0.0.0/8" {
+		t.Fatalf("order should follow the input, got %v", got)
+	}
+}
+
+// TestProbeHosts_IPv6Slash64 is the case the "you cannot sweep a /64" worry was
+// about. ProbeHosts never sweeps: it returns the first and last addresses, and
+// both are only ever arguments to "ip route get", which is a FIB lookup. A /64
+// therefore costs two lookups, not 2^64.
+func TestProbeHosts_IPv6Slash64(t *testing.T) {
+	hosts, err := ProbeHosts(netip.MustParsePrefix("fd00:8::/64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("want two probes, got %v", hosts)
+	}
+	if hosts[0].String() != "fd00:8::1" {
+		t.Fatalf("first probe: %s", hosts[0])
+	}
+	// IPv6 has no broadcast address, so the top of the prefix is used as is.
+	if hosts[1].String() != "fd00:8::ffff:ffff:ffff:ffff" {
+		t.Fatalf("last probe: %s", hosts[1])
+	}
+}
+
+func TestProbeHosts_IPv6HostPrefix(t *testing.T) {
+	hosts, err := ProbeHosts(netip.MustParsePrefix("fd00:8::1/128"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || hosts[0].String() != "fd00:8::1" {
+		t.Fatalf("a /128 is a single host: %v", hosts)
+	}
+}
+
+// TestProbeHosts_IPv4BroadcastStillSkipped guards that generalising lastUsable
+// did not lose the IPv4-only broadcast rule.
+func TestProbeHosts_IPv4BroadcastStillSkipped(t *testing.T) {
+	hosts, err := ProbeHosts(netip.MustParsePrefix("192.168.8.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 2 || hosts[0].String() != "192.168.8.1" || hosts[1].String() != "192.168.8.254" {
+		t.Fatalf("want .1 and .254 (not the broadcast .255), got %v", hosts)
+	}
+}
+
+// TestRouteGet_PicksFamilyFromDestination pins that the family follows the
+// address. Leaving it at iproute2's default would have read the IPv4 table
+// while asking about an IPv6 destination.
+func TestRouteGet_PicksFamilyFromDestination(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip -6 route get fd00:30::10"] =
+		"fd00:30::10 from :: via fd00:8::162 dev wlan0 src fd00:8::99 metric 1024 pref medium"
+	res, err := RouteGet(r, netip.MustParseAddr("fd00:30::10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Via.String() != "fd00:8::162" || res.Dev != "wlan0" {
+		t.Fatalf("parsed %+v", res)
+	}
+	for _, c := range r.Calls {
+		if strings.Contains(c, "-4 route get fd00") {
+			t.Fatalf("an IPv6 destination must not be looked up in the IPv4 table: %v", r.Calls)
+		}
+	}
+}
+
+// TestAssertSingleDefaultRoute6_NoRouteIsASentinel keeps "this host has no
+// IPv6" distinct from "something went wrong": a v4-only network is an ordinary
+// state, not a failure.
+func TestAssertSingleDefaultRoute6_NoRouteIsASentinel(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	err := AssertSingleDefaultRoute6(r)
+	if !errors.Is(err, ErrNoDefaultRoute6) {
+		t.Fatalf("want ErrNoDefaultRoute6, got %v", err)
+	}
+}
+
+func TestAssertSingleDefaultRoute6_TwoRoutesIsAnError(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip -6 route show default"] = strings.Join([]string{
+		"default via fd00:8::1 dev wlan0 metric 1024 pref medium",
+		"default via fd00:8::162 dev eth0 metric 100 pref medium",
+	}, "\n")
+	if err := AssertSingleDefaultRoute6(r); err == nil {
+		t.Fatal("two IPv6 defaults mean something else is competing for off-LAN traffic")
+	}
+}
+
+// TestHostFamilies_EmptyOutputMeansAbsent is the property every existing test
+// depends on: a fake Runner answers "" for anything it was not told about, and
+// that has to read as "no such family here" rather than as an error.
+func TestHostFamilies_EmptyOutputMeansAbsent(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	v4, v6 := HostFamilies(r)
+	if v4 || v6 {
+		t.Fatalf("nothing scripted, so neither family is present: v4=%v v6=%v", v4, v6)
+	}
+	r.Outputs["ip -4 route show default"] = "default via 192.168.8.1 dev wlan0"
+	v4, v6 = HostFamilies(r)
+	if !v4 || v6 {
+		t.Fatalf("v4 only: v4=%v v6=%v", v4, v6)
+	}
+}
+
+// TestDetectOnLinkPrefixes_SkipsLinkLocal documents why fe80::/64 is excluded:
+// it exists on every interface, and "ip -6 route get" on a link-local address
+// fails without a dev, which would make the on-link assertion unsatisfiable.
+func TestDetectOnLinkPrefixes_SkipsLinkLocal(t *testing.T) {
+	got, err := DetectOnLinkPrefixes()
+	if err != nil {
+		t.Skipf("cannot enumerate interfaces here: %v", err)
+	}
+	for _, p := range got {
+		if p.Addr().IsLinkLocalUnicast() {
+			t.Fatalf("link-local prefix %s must not be in the protected set", p)
+		}
 	}
 }

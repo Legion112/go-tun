@@ -2,6 +2,7 @@ package gotunclient
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -44,15 +45,38 @@ const (
 	DefaultDNS       = "192.168.8.1"
 	DefaultStatePath = "/var/lib/gotun-client/state.json"
 	DefaultProbe     = "1.1.1.1"
+	// DefaultProbe6 is only ever an argument to "ip -6 route get", which is a
+	// FIB lookup -- no packet is sent to it, so using a public literal here
+	// reveals nothing. It keeps the existing Cloudflare choice rather than
+	// bringing in another third party.
+	DefaultProbe6 = "2606:4700:4700::1111"
 
 	rollbackUnit = "gotun-client-rollback"
 )
 
 // EnableOptions configures Enable.
 type EnableOptions struct {
-	Gateway      netip.Addr
-	DNS          netip.Addr
-	Probe        netip.Addr
+	Gateway netip.Addr
+	DNS     netip.Addr
+	Probe   netip.Addr
+	// Gateway6 is the gotun box's IPv6 address. Zero leaves the IPv6 half
+	// unmanaged, which means IPv6 keeps egressing the ISP uplink -- the same
+	// leak the gateway's -ipv6-fallback=direct describes, seen from the client.
+	Gateway6 netip.Addr
+	// DNS6 is written to ipv6.dns. Zero writes nothing: ipv6.ignore-auto-dns
+	// already stops the ISP's IPv6 resolver competing, and the pinned IPv4
+	// resolver answers AAAA queries perfectly well.
+	DNS6 netip.Addr
+	// Probe6 is an off-LAN IPv6 address used to assert the default route
+	// moved. It is only ever an argument to "ip -6 route get", which is a FIB
+	// lookup -- no packet is sent to it.
+	Probe6 netip.Addr
+	// ManageV6 is the -ipv6 flag. When false, gotun does not touch the IPv6
+	// half at all.
+	ManageV6 bool
+	// StrictV6 turns IPv6 verification failures into errors that roll the
+	// enable back, instead of warnings.
+	StrictV6     bool
 	ExtraLANs    []netip.Prefix
 	StatePath    string
 	ConnectionID string
@@ -113,8 +137,17 @@ var sleepFunc = time.Sleep
 // ipv4.gateway is deliberately never written: NetworkManager only materialises
 // it alongside static ipv4.addresses, so under method=auto it is inert. The
 // working knobs are never-default plus an explicit default in ipv4.routes.
+// The IPv6 half mirrors the IPv4 reasoning exactly, and stops short in the same
+// place: ipv6.method is never written either. Flipping a profile from disabled,
+// ignore or link-local to auto would turn IPv6 ON for someone who had switched
+// it off, and "IPv6 on by default" has to mean "gotun manages the IPv6 you
+// have", never "gotun gives you IPv6". ipv6.gateway is skipped for the same
+// inertness reason as ipv4.gateway.
+//
+// With Gateway6 unset the argv is byte-for-byte what it was before IPv6
+// support, which is what keeps an IPv4-only client unaffected.
 func buildEnableArgs(o EnableOptions) []string {
-	return []string{
+	args := []string{
 		"ipv4.never-default", "yes",
 		// One argv element: "<dest> <nexthop>". Appended with + so any
 		// pre-existing static route survives.
@@ -123,12 +156,26 @@ func buildEnableArgs(o EnableOptions) []string {
 		"ipv4.dns", o.DNS.String(),
 		"ipv6.ignore-auto-dns", "yes",
 	}
+	if o.Gateway6.IsValid() {
+		args = append(args,
+			"ipv6.never-default", "yes",
+			"+ipv6.routes", "::/0 "+o.Gateway6.String(),
+		)
+	}
+	if o.DNS6.IsValid() {
+		args = append(args, "ipv6.dns", o.DNS6.String())
+	}
+	return args
 }
 
 // buildRestoreArgs returns the argv that puts saved back. Properties that were
 // unset are assigned the empty string, which resets them to their default.
+// The IPv6 block is emitted only when the snapshot actually captured one. A
+// nil IPv6 means the state file predates IPv6 support, or the profile had no
+// ipv6.method to record -- either way there is nothing to put back, and
+// assigning empty strings would clear static IPv6 routes gotun never touched.
 func buildRestoreArgs(saved NMProps) []string {
-	return []string{
+	args := []string{
 		"ipv4.never-default", nmBoolArg(saved.NeverDefault),
 		"ipv4.routes", nmArg(saved.Routes),
 		"ipv4.route-metric", nmArg(saved.RouteMetric),
@@ -136,6 +183,15 @@ func buildRestoreArgs(saved NMProps) []string {
 		"ipv4.dns", nmArg(saved.DNS),
 		"ipv6.ignore-auto-dns", nmBoolArg(saved.IPv6IgnoreDNS),
 	}
+	if v6 := saved.IPv6; v6 != nil {
+		args = append(args,
+			"ipv6.never-default", nmBoolArg(v6.NeverDefault),
+			"ipv6.routes", nmArg(v6.Routes),
+			"ipv6.route-metric", nmArg(v6.RouteMetric),
+			"ipv6.dns", nmArg(v6.DNS),
+		)
+	}
+	return args
 }
 
 // applyProps writes props to the connection according to mode.
@@ -196,6 +252,15 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 	if !o.Probe.IsValid() {
 		o.Probe = netip.MustParseAddr(DefaultProbe)
 	}
+	if !o.Probe6.IsValid() {
+		o.Probe6 = netip.MustParseAddr(DefaultProbe6)
+	}
+	if o.Gateway6.IsValid() && !o.Gateway6.Is6() {
+		return fmt.Errorf("invalid -gateway6 %q: must be an IPv6 address", o.Gateway6)
+	}
+	if o.DNS6.IsValid() && !o.DNS6.Is6() {
+		return fmt.Errorf("invalid -dns6 %q: must be an IPv6 address", o.DNS6)
+	}
 
 	if handed, err := detach(r, w, o); err != nil || handed {
 		return err
@@ -216,6 +281,43 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 		return fmt.Errorf("ipv4.method=%q on %q is not supported (want auto or manual)", cur.Method, conn.ID)
 	}
 
+	// Decide about the IPv6 half before anything is written.
+	//
+	// Every path that declines leaves IPv6 pointing at the ISP uplink, which
+	// is a silent leak rather than a visible failure, so each one says so.
+	var v6Notes []string
+	if !o.ManageV6 {
+		o.Gateway6, o.DNS6 = netip.Addr{}, netip.Addr{}
+	} else if !cur.ManagesIPv6() {
+		method := "unset"
+		if cur.IPv6 != nil && cur.IPv6.Method != "" {
+			method = cur.IPv6.Method
+		}
+		v6Notes = append(v6Notes, fmt.Sprintf(
+			"ipv6.method=%s on %s, so there is no IPv6 to manage; leaving it alone", method, conn.ID))
+		o.Gateway6, o.DNS6 = netip.Addr{}, netip.Addr{}
+	} else if !o.Gateway6.IsValid() {
+		gw6, err := DetectGateway6(r, conn.Device, o.Gateway)
+		if err != nil {
+			if o.StrictV6 {
+				return fmt.Errorf("-ipv6-strict: %w", err)
+			}
+			v6Notes = append(v6Notes, fmt.Sprintf(
+				"could not find the gateway's IPv6 address (%v); IPv6 traffic will egress"+
+					" the ISP DIRECTLY and is not classified by gotun."+
+					" Pass -gateway6, or -ipv6=false to stop trying", err))
+		} else {
+			o.Gateway6 = gw6
+		}
+	}
+	if o.Gateway6.IsValid() && cur.IPv6 != nil && cur.IPv6.Routes != nil && !o.Force {
+		// Unlike ipv4.routes this does not abort the enable. Plenty of hosts
+		// carry a static IPv6 route legitimately, and refusing the whole
+		// operation over the IPv6 half would hand the user no tunnel at all.
+		v6Notes = append(v6Notes, fmt.Sprintf(
+			"ipv6.routes is already set to %q; leaving IPv6 alone (use -force to take it over)", *cur.IPv6.Routes))
+		o.Gateway6 = netip.Addr{}
+	}
 	protected, err := protectedSet(o.ExtraLANs)
 	if err != nil {
 		return err
@@ -228,6 +330,7 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 		Saved:          cur,
 		EnabledGateway: o.Gateway.String(),
 		EnabledDNS:     o.DNS.String(),
+		IPv6Managed:    o.Gateway6.IsValid(),
 		Mode:           string(o.Mode),
 		SelfPath:       o.SelfPath,
 		SavedAt:        time.Now().UTC(),
@@ -245,11 +348,31 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 		}
 		fmt.Fprintf(w, "state file exists, -force: reusing snapshot from %s\n", prev.SavedAt.Format(time.RFC3339))
 		st.Saved = prev.Saved
+		if prev.Saved.IPv6 == nil && o.Gateway6.IsValid() {
+			// The reused snapshot predates IPv6 support, so disable would have
+			// nothing to put the IPv6 properties back to. Taking IPv6 over now
+			// would leave it stuck pointing at a gateway that may be gone.
+			if o.StrictV6 {
+				return fmt.Errorf("-ipv6-strict: the reused snapshot predates IPv6 support;" +
+					" run disable then enable to manage the IPv6 half")
+			}
+			fmt.Fprintf(w, "IPv6: the reused snapshot predates IPv6 support, so IPv6 stays DIRECT"+
+				" for this apply. Run disable then enable to manage it.\n")
+			o.Gateway6 = netip.Addr{}
+			st.IPv6Managed = false
+		}
 	}
 
 	if cur.Routes != nil && !o.Force {
 		return fmt.Errorf("ipv4.routes on %q is already set (%s); re-run with -force once you have checked it can be restored",
 			conn.ID, *cur.Routes)
+	}
+
+	// Reported only once the enable is actually going ahead. Printing these
+	// alongside a refusal would leave the user reading an IPv6 warning about
+	// an apply that never happened.
+	for _, n := range v6Notes {
+		fmt.Fprintf(w, "IPv6: %s\n", n)
 	}
 
 	// The snapshot must reach disk before anything is mutated.
@@ -302,11 +425,28 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 	// Drop stale PMTU/redirect exceptions so the assertions below read the FIB
 	// rather than a cached per-destination answer.
 	_ = FlushRouteCache(r)
-	if err := verifyEnabled(r, protected, o.Gateway, o.Probe); err != nil {
+	warnings, err := verifyEnabled(r, verifyTargets{
+		Protected: protected,
+		Gateway:   o.Gateway,
+		Probe:     o.Probe,
+		Gateway6:  o.Gateway6,
+		Probe6:    o.Probe6,
+		Strict6:   o.StrictV6,
+	})
+	if err != nil {
 		return fail(err)
+	}
+	for _, warn := range warnings {
+		fmt.Fprintf(w, "WARNING: %s\n", warn)
 	}
 
 	fmt.Fprintf(w, "enabled: %s (%s) default via %s, dns %s, mode %s\n", conn.ID, conn.Device, o.Gateway, o.DNS, o.Mode)
+	if o.Gateway6.IsValid() {
+		fmt.Fprintf(w, "IPv6: default via %s\n", o.Gateway6)
+	} else if _, v6 := HostFamilies(r); v6 {
+		fmt.Fprintf(w, "IPv6: NOT TUNNELED -- IPv6 traffic egresses the ISP directly."+
+			" Clients prefer IPv6 when both families resolve, so this is most traffic.\n")
+	}
 	fmt.Fprintf(w, "protected LANs: %s\n", formatPrefixes(protected))
 	if o.ConfirmTimeout > 0 {
 		fmt.Fprintf(w, "\nARMED: settings revert automatically in %s\n", o.ConfirmTimeout)
@@ -316,17 +456,64 @@ func Enable(r linux.Runner, w io.Writer, o EnableOptions) error {
 	return nil
 }
 
+// verifyTargets is what verifyEnabled checks against. A struct rather than a
+// growing positional list, now that both families are involved.
+type verifyTargets struct {
+	Protected []netip.Prefix
+	Gateway   netip.Addr
+	Probe     netip.Addr
+	Gateway6  netip.Addr // zero skips the IPv6 assertions
+	Probe6    netip.Addr
+	Strict6   bool
+}
+
 // verifyEnabled is the post-apply gate: the default route must have moved, no
 // protected LAN may hairpin through the gateway, and there must be exactly one
 // default route.
-func verifyEnabled(r linux.Runner, protected []netip.Prefix, gw, probe netip.Addr) error {
-	if err := AssertDefaultViaGateway(r, probe, gw); err != nil {
-		return err
+//
+// IPv4 failures are fatal and roll the enable back. IPv6 failures are warnings
+// unless Strict6, and the asymmetry is deliberate: rolling back a working IPv4
+// tunnel because NetworkManager would not move the IPv6 default would leave the
+// user with no tunnel at all, where degrading the IPv6 half leaves them with
+// the IPv4 one and a loud notice. The realistic cause is the kernel's own RA
+// handling racing NM over the IPv6 default route, which is a host-level
+// condition rather than something this apply did wrong.
+func verifyEnabled(r linux.Runner, t verifyTargets) ([]string, error) {
+	if err := AssertDefaultViaGateway(r, t.Probe, t.Gateway); err != nil {
+		return nil, err
 	}
 	if err := AssertSingleDefaultRoute(r); err != nil {
-		return err
+		return nil, err
 	}
-	return AssertLANsOnLink(r, protected, gw)
+	if err := AssertLANsOnLink(r, t.Protected, t.Gateway); err != nil {
+		return nil, err
+	}
+	if !t.Gateway6.IsValid() {
+		return nil, nil
+	}
+
+	var warns []string
+	note := func(format string, a ...any) error {
+		msg := fmt.Sprintf(format, a...)
+		if t.Strict6 {
+			return fmt.Errorf("-ipv6-strict: %s", msg)
+		}
+		warns = append(warns, msg)
+		return nil
+	}
+	if err := AssertDefaultViaGateway(r, t.Probe6, t.Gateway6); err != nil {
+		if err := note("the IPv6 default route did not move to %s (%v);"+
+			" IPv6 traffic egresses the ISP DIRECTLY and is not classified by gotun."+
+			" Re-run with -ipv6=false to stop managing it", t.Gateway6, err); err != nil {
+			return nil, err
+		}
+	}
+	if err := AssertSingleDefaultRoute6(r); err != nil && !errors.Is(err, ErrNoDefaultRoute6) {
+		if err := note("IPv6 default routes: %v", err); err != nil {
+			return nil, err
+		}
+	}
+	return warns, nil
 }
 
 // settle waits for NM to finish reactivating the device and for a default route
@@ -337,8 +524,9 @@ func settle(r linux.Runner, dev string, timeout time.Duration) error {
 	for {
 		ok, err := deviceConnected(r, dev)
 		if err == nil && ok {
-			out, rErr := r.Run("ip", "-4", "route", "show", "default")
-			if rErr == nil && strings.TrimSpace(out) != "" {
+			// Either family counts: a v6-only network is a supported shape,
+			// and waiting for an IPv4 default there would always time out.
+			if v4, v6 := HostFamilies(r); v4 || v6 {
 				return nil
 			}
 			last = fmt.Errorf("device %s connected but no default route yet", dev)

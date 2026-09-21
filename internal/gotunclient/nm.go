@@ -19,6 +19,11 @@ var nmReadFields = []string{
 	"ipv4.routes",
 	"ipv4.route-metric",
 	"ipv6.ignore-auto-dns",
+	"ipv6.method",
+	"ipv6.dns",
+	"ipv6.never-default",
+	"ipv6.routes",
+	"ipv6.route-metric",
 }
 
 // splitTerse splits one `nmcli -t` line on unescaped colons, honouring \: and \\.
@@ -126,12 +131,61 @@ func parseNMProps(out string) (NMProps, error) {
 			}
 		case "ipv6.ignore-auto-dns":
 			p.IPv6IgnoreDNS = nmBool(val)
+		case "ipv6.method":
+			// Allocated lazily, so a profile that reports no ipv6.method --
+			// and every version 1 state file -- leaves IPv6 nil, which is what
+			// makes disable emit the pre-IPv6 argument list unchanged.
+			p.ipv6().Method = strings.TrimSpace(val)
+		case "ipv6.dns":
+			p.ipv6().DNS = nmOptional(val)
+		case "ipv6.never-default":
+			p.ipv6().NeverDefault = nmBool(val)
+		case "ipv6.routes":
+			if v := nmOptional(val); v != nil {
+				v6 := p.ipv6()
+				if v6.Routes == nil {
+					v6.Routes = v
+				} else {
+					joined := *v6.Routes + ", " + *v
+					v6.Routes = &joined
+				}
+			}
+		case "ipv6.route-metric":
+			if v := nmOptional(val); v != nil && *v != "-1" {
+				p.ipv6().RouteMetric = v
+			}
 		}
 	}
 	if !seen["ipv4.method"] {
 		return p, fmt.Errorf("nmcli output has no ipv4.method line")
 	}
 	return p, nil
+}
+
+// ipv6 lazily allocates the IPv6 half of the snapshot. Only the parser calls
+// it; everywhere else a nil NMProps.IPv6 must stay nil.
+func (p *NMProps) ipv6() *NMPropsV6 {
+	if p.IPv6 == nil {
+		p.IPv6 = &NMPropsV6{}
+	}
+	return p.IPv6
+}
+
+// ManagesIPv6 reports whether NM is configuring IPv6 on this profile at all.
+// A profile set to ignore, disabled or link-local has no IPv6 default route to
+// take charge of, so gotun leaves it alone rather than switching it on -- "on
+// by default" must mean "gotun manages the IPv6 you have", never "gotun turns
+// IPv6 on for you".
+func (p NMProps) ManagesIPv6() bool {
+	if p.IPv6 == nil {
+		return false
+	}
+	switch p.IPv6.Method {
+	case "auto", "dhcp", "manual":
+		return true
+	default:
+		return false
+	}
 }
 
 // ReadNMProps snapshots the properties of a connection profile.
@@ -305,15 +359,15 @@ func deviceConnected(r linux.Runner, dev string) (bool, error) {
 }
 
 // DeviceDNS returns the DNS servers NM has applied to dev.
-func DeviceDNS(r linux.Runner, dev string) ([]string, error) {
-	out, err := r.Run("nmcli", "-t", "-f", "IP4.DNS", "device", "show", dev)
+func deviceDNSField(r linux.Runner, dev, field string) ([]string, error) {
+	out, err := r.Run("nmcli", "-t", "-f", field, "device", "show", dev)
 	if err != nil {
 		return nil, err
 	}
 	var dns []string
 	for _, line := range strings.Split(out, "\n") {
 		f := splitTerse(strings.TrimRight(line, "\r"))
-		if len(f) < 2 || !strings.HasPrefix(f[0], "IP4.DNS") {
+		if len(f) < 2 || !strings.HasPrefix(f[0], field) {
 			continue
 		}
 		if v := strings.TrimSpace(strings.Join(f[1:], ":")); v != "" {
@@ -321,4 +375,17 @@ func DeviceDNS(r linux.Runner, dev string) ([]string, error) {
 		}
 	}
 	return dns, nil
+}
+
+// DeviceDNS reads the IPv4 resolvers NM has on the device. The field list is
+// deliberately unchanged: widening it would alter the nmcli invocation every
+// existing test keys on, for no gain over a second call.
+func DeviceDNS(r linux.Runner, dev string) ([]string, error) {
+	return deviceDNSField(r, dev, "IP4.DNS")
+}
+
+// DeviceDNS6 is the IPv6 counterpart. A host with no IPv6 resolvers returns an
+// empty slice rather than an error.
+func DeviceDNS6(r linux.Runner, dev string) ([]string, error) {
+	return deviceDNSField(r, dev, "IP6.DNS")
 }

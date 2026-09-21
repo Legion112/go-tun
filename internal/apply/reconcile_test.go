@@ -13,14 +13,21 @@ import (
 	"github.com/legion/go-tun/internal/policy"
 )
 
+// basePolicy is dual-stack so the canned converged fixtures in
+// linux.RecordingRunner have both halves to match against. A v4-only policy
+// here would leave every idempotency test below blind to IPv6 drift.
 func basePolicy() policy.Policy {
 	return policy.Policy{
-		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
-		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
-		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
-		FailMode:        policy.FailClosed,
-		TunnelUp:        false, // blackhole — no need for real wg keys in unit tests
+		DirectPrefixes: []netip.Prefix{
+			netip.MustParsePrefix("10.200.0.0/24"),
+			netip.MustParsePrefix("fd00:200::/64"),
+		},
+		TunnelInterface:   "wg-exit",
+		TunnelEndpoints:   []netip.Addr{netip.MustParseAddr("10.10.0.2")},
+		LANs:              []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24"), netip.MustParsePrefix("fd00:10::/64")},
+		FailMode:          policy.FailClosed,
+		TunnelUp:          false, // blackhole — no need for real wg keys in unit tests
+		TunnelCarriesIPv6: true,
 	}
 }
 
@@ -60,7 +67,7 @@ func TestReconcile_SecondApplySemanticNoop(t *testing.T) {
 
 func TestReconcile_PartialFailureStops(t *testing.T) {
 	r := linux.NewRecordingRunner()
-	r.FailOn = "ip route"
+	r.FailOn = "route replace"
 	_, err := apply.Reconcile(r, basePolicy())
 	if err == nil {
 		t.Fatal("expected error")
@@ -146,6 +153,7 @@ func directSNATPolicy() policy.Policy {
 func TestReconcile_DirectSNATSecondApplySemanticNoop(t *testing.T) {
 	r := linux.NewRecordingRunner()
 	r.AlreadyApplied = true
+	r.AlreadySNAT = true
 	res, err := apply.Reconcile(r, directSNATPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +280,7 @@ func TestClear_ContinuesPastAFailure(t *testing.T) {
 	r.FailOn = "nft delete table"
 	_ = apply.Clear(r)
 	joined := strings.Join(r.Calls, "\n")
-	for _, want := range []string{"ip rule del priority", "nft delete table", "ip link del dev wg-exit"} {
+	for _, want := range []string{"rule del priority", "nft delete table", "ip link del dev wg-exit"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("teardown skipped %q:\n%s", want, joined)
 		}
@@ -289,7 +297,7 @@ func TestClear_RemovesTheRuleBeforeTheTunnel(t *testing.T) {
 	}
 	rule, link := -1, -1
 	for i, c := range r.Calls {
-		if rule < 0 && strings.HasPrefix(c, "ip rule del priority") {
+		if rule < 0 && strings.Contains(c, "rule del priority") {
 			rule = i
 		}
 		if link < 0 && strings.HasPrefix(c, "ip link del dev wg-exit") {

@@ -30,13 +30,17 @@ func InterfacesForPrefixes(prefixes []netip.Prefix) ([]string, error) {
 		}
 		for _, a := range addrs {
 			ipnet, ok := a.(*net.IPNet)
-			if !ok || ipnet.IP.To4() == nil {
-				continue
-			}
-			addr, ok := netip.AddrFromSlice(ipnet.IP.To4())
 			if !ok {
 				continue
 			}
+			// Unmap matters: net.IPNet hands back a 16-byte slice for IPv4
+			// addresses too, and a 4-in-6 Addr is not Contains-ed by an IPv4
+			// prefix, so without this every IPv4 LAN would stop matching.
+			addr, ok := netip.AddrFromSlice(ipnet.IP)
+			if !ok {
+				continue
+			}
+			addr = addr.Unmap()
 			for _, p := range prefixes {
 				if p.Contains(addr) {
 					seen[iface.Name] = struct{}{}

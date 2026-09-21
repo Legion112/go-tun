@@ -14,7 +14,7 @@ func testPolicy(tunnelUp bool) policy.Policy {
 			netip.MustParsePrefix("10.200.0.0/24"),
 		},
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.10.0.2")},
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		Mark:            policy.DefaultMark,
 		Table:           policy.DefaultTableID,
@@ -59,8 +59,17 @@ func TestCompile_EndpointExcluded(t *testing.T) {
 	if len(markRule.ExcludeAddrs) != 1 || markRule.ExcludeAddrs[0].String() != "10.10.0.2" {
 		t.Fatalf("exclude addrs: %v", markRule.ExcludeAddrs)
 	}
-	if len(markRule.ExcludePrefixes) != 1 {
+	// The LAN, plus the IPv4 half of MandatoryNonRoutable -- loopback and
+	// multicast are excluded whatever the operator passes, because nothing
+	// reachable through an exit hop lives there.
+	want := map[string]bool{"10.10.0.0/24": true, "127.0.0.0/8": true, "224.0.0.0/4": true}
+	if len(markRule.ExcludePrefixes) != len(want) {
 		t.Fatalf("exclude prefixes: %v", markRule.ExcludePrefixes)
+	}
+	for _, p := range markRule.ExcludePrefixes {
+		if !want[p.String()] {
+			t.Fatalf("unexpected exclude prefix %s in %v", p, markRule.ExcludePrefixes)
+		}
 	}
 }
 
@@ -123,7 +132,7 @@ func TestSemanticEqual_IgnoresPrefixOrder(t *testing.T) {
 
 func TestCompile_RequiresEndpoint(t *testing.T) {
 	p := testPolicy(true)
-	p.TunnelEndpoint = netip.Addr{}
+	p.TunnelEndpoints = nil
 	if _, err := policy.Compile(p); err == nil {
 		t.Fatal("expected error")
 	}
@@ -148,7 +157,7 @@ func TestCompile_InboundIsolatesHomeNets(t *testing.T) {
 	p.InboundWireGuard = policy.WireGuardConfig{
 		PrivateKey: "CLIENTPRIV",
 		ListenPort: 51821,
-		Address:    netip.MustParsePrefix("10.98.0.1/30"),
+		Addresses:  []netip.Prefix{netip.MustParsePrefix("10.98.0.1/30")},
 		Peer: policy.WireGuardPeer{
 			PublicKey:  "WANPEER",
 			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.98.0.2/32")},
@@ -197,7 +206,7 @@ func TestCompile_DisablesSendRedirectsIncludingPerDevice(t *testing.T) {
 	p := policy.Policy{
 		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.10.0.2")},
 		LANs:            []netip.Prefix{netip.MustParsePrefix("192.168.8.0/24")},
 		LANIfaces:       []string{"enp1s0"},
 		Mark:            0x1,
@@ -234,7 +243,7 @@ func TestCompile_DisablesSendRedirectsIncludingPerDevice(t *testing.T) {
 func TestCompile_NoLANIfacesStillClearsAll(t *testing.T) {
 	st, err := policy.Compile(policy.Policy{
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
+		TunnelEndpoints: []netip.Addr{netip.MustParseAddr("10.10.0.2")},
 		Mark:            0x1, Table: 100, RulePriority: 100,
 		FailMode: policy.FailClosed, TunnelUp: true,
 	})
@@ -451,7 +460,12 @@ func TestCompile_FailClosedStillBlackholes(t *testing.T) {
 	}
 }
 
-func TestCompile_IPv6NotTouchedByDefault(t *testing.T) {
+// TestCompile_IPv6NotDisabledByDefault is about the kill switch, not about
+// classification: no disable_ipv6 sysctl and no blanket drop rule unless
+// -drop-ipv6 asks for them. Whether IPv6 is classified is a separate question,
+// covered in ipv6_test.go -- this policy has no IPv6 prefixes and a peer that
+// cannot carry IPv6, so Auto correctly declines.
+func TestCompile_IPv6NotDisabledByDefault(t *testing.T) {
 	st, err := policy.Compile(testPolicy(true))
 	if err != nil {
 		t.Fatal(err)

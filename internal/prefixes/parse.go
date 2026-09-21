@@ -24,8 +24,12 @@ func ParseCIDRList(r io.Reader) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse cidr %q: %w", line, err)
 		}
-		if p.Addr().Is6() {
-			continue // v1 IPv4 only
+		if p.Addr().Is4In6() {
+			// ::ffff:a.b.c.d reports Is6, so it would be classified into the
+			// IPv6 set, where it can never match: the kernel matches a v6
+			// packet's destination and a v4 packet never presents one. Refuse
+			// rather than silently classify nothing.
+			return nil, fmt.Errorf("parse cidr %q: 4-in-6 prefix; write it as plain IPv4", line)
 		}
 		out = append(out, p)
 	}
@@ -43,19 +47,40 @@ func ParseCIDRFile(path string) ([]netip.Prefix, error) {
 }
 
 // ParseMaxMindCountryDir parses GeoLite2-Country-CSV style directories.
-// Expects Locations-en.csv and Blocks-IPv4.csv in dir (or filenames passed).
+// Expects Locations-en.csv plus Blocks-IPv4.csv and/or Blocks-IPv6.csv.
+//
+// The IPv6 blocks file is optional: the MaxMind zip has always contained it and
+// extractZip has always unpacked it, but older fixture directories carry only
+// the IPv4 one, and a v4-only directory must keep working rather than become an
+// error. At least one blocks file is required.
 func ParseMaxMindCountryDir(dir, countryISO string) ([]netip.Prefix, error) {
 	locPath := findFile(dir, "Locations-en.csv", "GeoLite2-Country-Locations-en.csv")
-	blocksPath := findFile(dir, "Blocks-IPv4.csv", "GeoLite2-Country-Blocks-IPv4.csv")
-	if locPath == "" || blocksPath == "" {
-		return nil, fmt.Errorf("maxmind: missing Locations-en.csv or Blocks-IPv4.csv in %s", dir)
+	if locPath == "" {
+		return nil, fmt.Errorf("maxmind: missing Locations-en.csv in %s", dir)
+	}
+	blocks4 := findFile(dir, "Blocks-IPv4.csv", "GeoLite2-Country-Blocks-IPv4.csv")
+	blocks6 := findFile(dir, "Blocks-IPv6.csv", "GeoLite2-Country-Blocks-IPv6.csv")
+	if blocks4 == "" && blocks6 == "" {
+		return nil, fmt.Errorf("maxmind: missing Blocks-IPv4.csv and Blocks-IPv6.csv in %s", dir)
 	}
 
 	geonames, err := loadCountryGeonames(locPath, countryISO)
 	if err != nil {
 		return nil, err
 	}
-	return loadBlocksForGeonames(blocksPath, geonames)
+
+	var out []netip.Prefix
+	for _, path := range []string{blocks4, blocks6} {
+		if path == "" {
+			continue
+		}
+		prefs, err := loadBlocksForGeonames(path, geonames)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, prefs...)
+	}
+	return out, nil
 }
 
 func findFile(dir string, names ...string) string {
@@ -161,9 +186,10 @@ func loadBlocksForGeonames(path string, geonames map[string]struct{}) ([]netip.P
 		if err != nil {
 			return nil, fmt.Errorf("maxmind network %q: %w", rec[idxNet], err)
 		}
-		if p.Addr().Is4() {
-			out = append(out, p)
+		if p.Addr().Is4In6() {
+			return nil, fmt.Errorf("maxmind network %q: 4-in-6 prefix", rec[idxNet])
 		}
+		out = append(out, p)
 	}
 	return out, nil
 }
@@ -190,4 +216,71 @@ func WriteCIDRList(path string, prefixes []netip.Prefix) error {
 		}
 	}
 	return nil
+}
+
+// Families selects which address families a command emits.
+type Families struct{ V4, V6 bool }
+
+// ParseFamilies parses a -families flag value such as "v4", "v6" or "v4,v6".
+func ParseFamilies(s string) (Families, error) {
+	f := Families{}
+	for _, part := range strings.Split(s, ",") {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "":
+			continue
+		case "v4", "ipv4", "4":
+			f.V4 = true
+		case "v6", "ipv6", "6":
+			f.V6 = true
+		case "all", "both":
+			f.V4, f.V6 = true, true
+		default:
+			return Families{}, fmt.Errorf("unknown address family %q (want v4, v6 or v4,v6)", part)
+		}
+	}
+	if !f.V4 && !f.V6 {
+		return Families{}, fmt.Errorf("no address family selected")
+	}
+	return f, nil
+}
+
+func (f Families) String() string {
+	switch {
+	case f.V4 && f.V6:
+		return "v4,v6"
+	case f.V6:
+		return "v6"
+	default:
+		return "v4"
+	}
+}
+
+// FilterFamilies keeps only the prefixes whose family is selected.
+func FilterFamilies(prefs []netip.Prefix, f Families) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(prefs))
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			if f.V4 {
+				out = append(out, p)
+			}
+			continue
+		}
+		if f.V6 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// CountFamilies reports how many prefixes of each family are present, for the
+// per-family summaries the CLI prints.
+func CountFamilies(prefs []netip.Prefix) (v4, v6 int) {
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			v4++
+		} else {
+			v6++
+		}
+	}
+	return v4, v6
 }

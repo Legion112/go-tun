@@ -14,28 +14,35 @@ import (
 )
 
 // FetchPrefixes writes a country prefix list from a local MMDB or MaxMind CSV download.
-func FetchPrefixes(license, country, out, mmdbPath string) error {
+func FetchPrefixes(license, country, out, mmdbPath string, fams prefixes.Families) error {
 	raw, err := prefixes.LoadCountryPrefixesRaw(license, country, mmdbPath)
 	if err != nil {
 		return err
 	}
-	collapsed := prefixes.CollapseIPv4(raw)
+	collapsed := prefixes.Collapse(prefixes.FilterFamilies(raw, fams))
 	if err := prefixes.WriteCIDRList(out, collapsed); err != nil {
 		return err
 	}
-	fmt.Printf("gotun fetch: collapsed %d → %d prefixes → %s\n", len(raw), len(collapsed), out)
+	raw4, raw6 := prefixes.CountFamilies(raw)
+	got4, got6 := prefixes.CountFamilies(collapsed)
+	fmt.Printf("gotun fetch: collapsed %d → %d IPv4 and %d → %d IPv6 prefixes → %s\n",
+		raw4, got4, raw6, got6, out)
+	if got6 == 0 && fams.V6 {
+		fmt.Fprintln(os.Stderr, "gotun fetch: no IPv6 prefixes found;"+
+			" gotun apply will leave IPv6 unclassified unless you pass -ipv6 on")
+	}
 	return nil
 }
 
 // FetchMaxMind downloads and writes a country prefix list (CSV). Kept for callers.
 func FetchMaxMind(license, country, out string) error {
-	return FetchPrefixes(license, country, out, "")
+	return FetchPrefixes(license, country, out, "", prefixes.Families{V4: true, V6: true})
 }
 
 // ExportAmnezia fetches country prefixes and writes Amnezia site-based split-tunnel JSON.
 // Import into Amnezia with "listed sites bypass VPN" / except-listed mode so country
 // CIDRs go direct and everything else uses the tunnel.
-func ExportAmnezia(license, country, out, mmdbPath, format string) error {
+func ExportAmnezia(license, country, out, mmdbPath, format string, fams prefixes.Families) error {
 	siteFormat, err := amnezia.ParseFormat(format)
 	if err != nil {
 		return err
@@ -44,11 +51,12 @@ func ExportAmnezia(license, country, out, mmdbPath, format string) error {
 	if err != nil {
 		return err
 	}
-	collapsed := prefixes.CollapseIPv4(raw)
+	collapsed := prefixes.Collapse(prefixes.FilterFamilies(raw, fams))
 	if err := amnezia.WriteSites(out, collapsed, siteFormat); err != nil {
 		return err
 	}
-	fmt.Printf("gotun amnezia: collapsed %d → %d sites → %s (format=%s)\n", len(raw), len(collapsed), out, siteFormat)
+	fmt.Printf("gotun amnezia: collapsed %d → %d sites → %s (format=%s, families=%s)\n",
+		len(raw), len(collapsed), out, siteFormat, fams)
 	fmt.Println("gotun amnezia: in Amnezia, enable site-based split tunneling with listed sites bypassing the VPN")
 	return nil
 }
@@ -64,7 +72,10 @@ type ApplyOptions struct {
 	LANCSV          string
 	TunnelUp        bool
 	DirectSNAT      bool
+	DirectSNAT6     bool
 	FailMode        policy.FailMode
+	IPv6            policy.IPv6Mode
+	IPv6Fallback    policy.IPv6Fallback
 	DropIPv6        bool
 	MarkIfaceCSV    string
 	NonRoutableCSV  string
@@ -111,9 +122,16 @@ func Apply(o ApplyOptions) error {
 	if endpoint == "" {
 		return fmt.Errorf("-endpoint is required")
 	}
-	ep, err := netip.ParseAddr(endpoint)
-	if err != nil {
-		return fmt.Errorf("endpoint: %w", err)
+	var eps []netip.Addr
+	for _, part := range splitCSV(endpoint) {
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return fmt.Errorf("endpoint %q: %w", part, err)
+		}
+		eps = append(eps, a)
+	}
+	if len(eps) == 0 {
+		return fmt.Errorf("-endpoint is required")
 	}
 
 	var prefs []netip.Prefix
@@ -129,7 +147,7 @@ func Apply(o ApplyOptions) error {
 	if err != nil {
 		return err
 	}
-	prefs = prefixes.CollapseIPv4(prefs)
+	prefs = prefixes.Collapse(prefs)
 
 	var lans []netip.Prefix
 	if lanCSV != "" {
@@ -157,7 +175,7 @@ func Apply(o ApplyOptions) error {
 	p := policy.Policy{
 		DirectPrefixes:  prefs,
 		TunnelInterface: policy.DefaultTunnelIface,
-		TunnelEndpoint:  ep,
+		TunnelEndpoints: eps,
 		LANs:            lans,
 		LANIfaces:       lanIfaces,
 		Mark:            policy.DefaultMark,
@@ -165,7 +183,10 @@ func Apply(o ApplyOptions) error {
 		RulePriority:    policy.DefaultRulePriority,
 		TunnelUp:        tunnelUp,
 		DirectSNAT:      directSNAT,
+		DirectSNAT6:     o.DirectSNAT6,
 		FailMode:        o.FailMode,
+		IPv6:            o.IPv6,
+		IPv6Fallback:    o.IPv6Fallback,
 		DropIPv6:        o.DropIPv6,
 		MarkIIfNames:    splitCSV(o.MarkIfaceCSV),
 	}
@@ -199,6 +220,12 @@ func Apply(o ApplyOptions) error {
 			return err
 		}
 		p.WireGuard = cfg
+		p.TunnelCarriesIPv6 = cfg.CarriesIPv6()
+	} else {
+		// No config to read, so ask the device. On OpenWrt the tunnel is
+		// netifd's, not gotun's, and this is the only way to know. Both reads
+		// are read-only, so they are honest under -dry-run.
+		p.TunnelCarriesIPv6 = probeTunnelIPv6(p.TunnelInterface)
 	}
 	if wgClientsConfig != "" {
 		cfg, err := loadWGQuick(wgClientsConfig)
@@ -212,6 +239,15 @@ func Apply(o ApplyOptions) error {
 	dry := &linux.DryRunner{Inner: linux.ExecRunner{}, Out: os.Stdout}
 	if o.DryRun {
 		runner = dry
+	}
+
+	// Compile once up front purely to surface its warnings. Every path that
+	// leaves IPv6 unclassified is a silent leak rather than a visible failure,
+	// so it has to be said out loud before the apply, not discovered later.
+	if st, err := policy.Compile(p); err == nil {
+		for _, w := range st.Warnings {
+			fmt.Fprintln(os.Stderr, "gotun apply: "+w)
+		}
 	}
 
 	res, err := apply.Reconcile(runner, p)
@@ -228,6 +264,33 @@ func Apply(o ApplyOptions) error {
 		fmt.Printf("gotun apply: %d changes\n", res.Changes)
 	}
 	return nil
+}
+
+// probeTunnelIPv6 reports whether the live tunnel device can carry IPv6.
+//
+// Both halves are needed: a v6 route in AllowedIPs with no v6 address on the
+// interface gives the kernel a route it cannot use, because source address
+// selection finds nothing. A failed probe -- no device yet, no privileges --
+// reads as "cannot", which is the connectivity-safe and privacy-unsafe answer,
+// and is exactly the case planIPv6 warns about.
+func probeTunnelIPv6(iface string) bool {
+	r := linux.ExecRunner{}
+	allowed, err := r.Run("wg", "show", iface, "allowed-ips")
+	if err != nil {
+		return false
+	}
+	var route bool
+	for _, f := range strings.Fields(allowed) {
+		if p, err := netip.ParsePrefix(f); err == nil && p.Addr().Is6() {
+			route = true
+			break
+		}
+	}
+	if !route {
+		return false
+	}
+	addrs, err := r.Run("ip", "-6", "addr", "show", "dev", iface, "scope", "global")
+	return err == nil && strings.Contains(addrs, "inet6")
 }
 
 // Clear removes owned kernel objects.
@@ -261,13 +324,22 @@ func loadWGQuick(path string) (policy.WireGuardConfig, error) {
 		case section == "[interface]" && k == "PrivateKey":
 			cfg.PrivateKey = v
 		case section == "[interface]" && k == "Address":
-			// take first address
-			addr := strings.Split(v, ",")[0]
-			addr = strings.TrimSpace(addr)
-			if p, err := netip.ParsePrefix(addr); err == nil {
-				cfg.Address = p
-			} else if a, err := netip.ParseAddr(addr); err == nil {
-				cfg.Address = netip.PrefixFrom(a, 32)
+			// Every address, not just the first. A dual-stack tunnel lists both
+			// families here, and taking Split(v, ",")[0] silently dropped the
+			// IPv6 half -- leaving a tunnel that advertises ::/0 in AllowedIPs
+			// but has no IPv6 source address to send from.
+			for _, addr := range strings.Split(v, ",") {
+				addr = strings.TrimSpace(addr)
+				if addr == "" {
+					continue
+				}
+				if p, err := netip.ParsePrefix(addr); err == nil {
+					cfg.Addresses = append(cfg.Addresses, p)
+				} else if a, err := netip.ParseAddr(addr); err == nil {
+					// wg-quick treats a bare address as a host address, which
+					// is /32 for IPv4 and /128 for IPv6 -- not /32 for both.
+					cfg.Addresses = append(cfg.Addresses, netip.PrefixFrom(a, a.BitLen()))
+				}
 			}
 		case section == "[interface]" && k == "ListenPort":
 			fmt.Sscanf(v, "%d", &cfg.ListenPort)

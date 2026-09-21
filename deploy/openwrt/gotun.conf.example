@@ -3,15 +3,18 @@
 # Collapsed CIDR list of destinations that go direct, out the ISP.
 GOTUN_PREFIXES=/etc/gotun/prefixes.txt
 
-# Underlay address of the WireGuard peer, excluded from marking so the tunnel
-# cannot try to carry its own handshake.
+# Underlay address(es) of the WireGuard peer, excluded from marking so the
+# tunnel cannot try to carry its own handshake. Comma-separated: a dual-stack
+# peer reachable over both families needs both listed, or the IPv6 classifier
+# marks the tunnel's own encapsulated packets.
 GOTUN_ENDPOINT=185.80.130.211
 
 # The device netifd created. It is named after the UCI interface section, and
 # UCI section names cannot contain hyphens -- so "wgexit", not "wg-exit".
 GOTUN_TUNNEL_IFACE=wgexit
 
-# Local CIDRs, excluded from marking.
+# Local CIDRs, excluded from marking. List the IPv6 prefix here too once the
+# LAN has one, or inbound WireGuard peers are not isolated from it.
 GOTUN_LAN=192.168.8.0/24
 
 # Only classify traffic arriving on these interfaces. Leaving this empty
@@ -27,3 +30,28 @@ GOTUN_MARK_IFACE=br-lan
 GOTUN_FAIL_MODE=open
 
 GOTUN_TUNNEL_UP=true
+
+# auto: classify IPv6 like IPv4, but only when it can actually work -- the peer
+#   must carry IPv6 and the prefix list must contain IPv6 entries. This is the
+#   default. On this router the tunnel belongs to netifd, so gotun probes the
+#   live device: add the IPv6 Address and AllowedIPs to the UCI wireguard
+#   section, or IPv6 stays unclassified.
+# on:  classify IPv6 regardless of what the peer advertises.
+# off: leave IPv6 entirely alone.
+GOTUN_IPV6=auto
+
+# What non-direct IPv6 does when the tunnel cannot carry it.
+# direct (default): it egresses the uplink. Nothing breaks, and every
+#   IPv6-capable destination sees your real address -- clients prefer IPv6 when
+#   both families resolve, so this is the usual path rather than a corner case.
+#   apply warns every time this engages.
+# blackhole: drop it in the routing table instead. Choose this if being seen
+#   matters more than IPv6 working.
+# drop: drop it in prerouting.
+GOTUN_IPV6_FALLBACK=direct
+
+# Turning IPv6 classification on writes net.ipv6.conf.all.forwarding=1. The
+# kernel then ignores Router Advertisements on any interface still at
+# accept_ra=1, so if the WAN address comes from SLAAC set accept_ra=2 on it
+# (UCI: option accept_ra '2' on the wan6 interface) or the router loses its own
+# IPv6 default route.

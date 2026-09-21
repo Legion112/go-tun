@@ -157,7 +157,59 @@ func textMatchSpec() policy.NftSpec {
 					Mark:            1,
 				},
 			},
+		}, {
+			// The fixture comes from a box running with -direct-snat, so the
+			// spec has to ask for this chain. Leaving it out is now drift: a
+			// chain nothing wants is exactly what must be noticed and removed.
+			Name: "postrouting", Type: "nat", Hook: "postrouting", Priority: 100, Policy: "accept",
+			Rules: []policy.NftRuleSpec{{
+				Description:    "snat-direct",
+				OIfNames:       []string{"eth0"},
+				SNATMasquerade: true,
+			}},
 		}},
+	}
+}
+
+// TestSemanticMatchText_ExtraChainIsDrift and its siblings pin the direction of
+// comparison that used to be missing. Drift detection only ever asked "is what
+// I want present?", so turning a feature off left its objects live forever
+// while apply reported convergence -- and since reconciliation is
+// delete-and-rewrite, noticing is the only thing that removes anything.
+func TestSemanticMatchText_ExtraChainIsDrift(t *testing.T) {
+	live, err := parseNftText(realNftText())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := textMatchSpec()
+	spec.Chains = spec.Chains[:1] // drop postrouting from the desired state
+	if semanticMatch(live, spec) {
+		t.Fatal("a live chain nothing asks for must read as drift, or -direct-snat can never be turned off")
+	}
+}
+
+func TestSemanticMatchText_ExtraSetIsDrift(t *testing.T) {
+	live, err := parseNftText(realNftText())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := textMatchSpec()
+	spec.Sets = nil
+	if semanticMatch(live, spec) {
+		t.Fatal("a live set nothing asks for must read as drift, or ru_nets6 survives -ipv6 off forever")
+	}
+}
+
+func TestSemanticMatchText_ExtraRuleIsDrift(t *testing.T) {
+	live, err := parseNftText(realNftText() + "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := textMatchSpec()
+	// Ask for one fewer exclude prefix than the live table carries.
+	spec.Chains[0].Rules[1].ExcludePrefixes = nil
+	if semanticMatch(live, spec) {
+		t.Fatal("a stale exclude-lan rule must read as drift")
 	}
 }
 

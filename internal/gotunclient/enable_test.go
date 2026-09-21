@@ -763,3 +763,112 @@ func TestDetach_DisabledRunsInline(t *testing.T) {
 		t.Fatal("-detach=false must run inline")
 	}
 }
+
+// TestBuildEnableArgs_DualStack pins the IPv6 properties and their order.
+func TestBuildEnableArgs_DualStack(t *testing.T) {
+	args := buildEnableArgs(EnableOptions{
+		Gateway:  netip.MustParseAddr("192.168.8.162"),
+		DNS:      netip.MustParseAddr("192.168.8.1"),
+		Gateway6: netip.MustParseAddr("fd00:8::162"),
+		DNS6:     netip.MustParseAddr("fd00:8::1"),
+	})
+	got := strings.Join(args, "|")
+	want := "ipv4.never-default|yes|+ipv4.routes|0.0.0.0/0 192.168.8.162|" +
+		"ipv4.ignore-auto-dns|yes|ipv4.dns|192.168.8.1|ipv6.ignore-auto-dns|yes|" +
+		"ipv6.never-default|yes|+ipv6.routes|::/0 fd00:8::162|ipv6.dns|fd00:8::1"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+// TestBuildEnableArgs_IPv4OnlyIsUnchanged is the compatibility guarantee: with
+// no IPv6 gateway the argv must be byte-for-byte what it was before IPv6
+// support, so an IPv4-only client sees no behaviour change at all.
+func TestBuildEnableArgs_IPv4OnlyIsUnchanged(t *testing.T) {
+	args := buildEnableArgs(EnableOptions{
+		Gateway: netip.MustParseAddr("192.168.8.162"),
+		DNS:     netip.MustParseAddr("192.168.8.1"),
+	})
+	want := "ipv4.never-default|yes|+ipv4.routes|0.0.0.0/0 192.168.8.162|" +
+		"ipv4.ignore-auto-dns|yes|ipv4.dns|192.168.8.1|ipv6.ignore-auto-dns|yes"
+	if got := strings.Join(args, "|"); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+// TestBuildEnableArgs_NeverWritesIPv6MethodOrGateway mirrors the IPv4 rule.
+// Flipping ipv6.method would turn IPv6 ON for someone who had switched it off;
+// "on by default" must mean gotun manages the IPv6 you have, not that it gives
+// you IPv6.
+func TestBuildEnableArgs_NeverWritesIPv6MethodOrGateway(t *testing.T) {
+	args := buildEnableArgs(EnableOptions{
+		Gateway:  netip.MustParseAddr("192.168.8.162"),
+		DNS:      netip.MustParseAddr("192.168.8.1"),
+		Gateway6: netip.MustParseAddr("fd00:8::162"),
+	})
+	for _, bad := range []string{"ipv6.method", "ipv6.gateway"} {
+		for _, a := range args {
+			if a == bad {
+				t.Fatalf("%s must never be written: %v", bad, args)
+			}
+		}
+	}
+}
+
+// TestBuildEnableArgs_IPv6RouteSpecIsSingleArgument guards the same shape the
+// IPv4 route relies on: nmcli takes "<dest> <nexthop>" as one argv element.
+func TestBuildEnableArgs_IPv6RouteSpecIsSingleArgument(t *testing.T) {
+	args := buildEnableArgs(EnableOptions{
+		Gateway:  netip.MustParseAddr("192.168.8.162"),
+		DNS:      netip.MustParseAddr("192.168.8.1"),
+		Gateway6: netip.MustParseAddr("fd00:8::162"),
+	})
+	for i, a := range args {
+		if a == "+ipv6.routes" {
+			if i+1 >= len(args) || args[i+1] != "::/0 fd00:8::162" {
+				t.Fatalf("route spec must be one argument, got %v", args)
+			}
+			return
+		}
+	}
+	t.Fatalf("no +ipv6.routes in %v", args)
+}
+
+// TestBuildRestoreArgs_V1SnapshotEmitsNoIPv6Args is the migration guarantee. A
+// state file written before IPv6 support has no ipv6 block, so disable must
+// emit exactly the arguments it always did -- assigning empty strings instead
+// would clear static IPv6 routes gotun never touched.
+func TestBuildRestoreArgs_V1SnapshotEmitsNoIPv6Args(t *testing.T) {
+	saved := NMProps{Method: "auto"} // IPv6 nil, as a v1 file unmarshals
+	args := buildRestoreArgs(saved)
+	for _, a := range args {
+		if strings.HasPrefix(a, "ipv6.") && a != "ipv6.ignore-auto-dns" {
+			t.Fatalf("a pre-IPv6 snapshot must not restore IPv6 properties, got %v", args)
+		}
+	}
+}
+
+func TestBuildRestoreArgs_DualStackSnapshot(t *testing.T) {
+	routes := "2001:db8::/32 fd00:8::9"
+	dns := "fd00:8::1"
+	saved := NMProps{
+		Method: "auto",
+		IPv6: &NMPropsV6{
+			Method:       "auto",
+			NeverDefault: true,
+			Routes:       &routes,
+			DNS:          &dns,
+		},
+	}
+	got := strings.Join(buildRestoreArgs(saved), "|")
+	for _, want := range []string{
+		"ipv6.never-default|yes",
+		"ipv6.routes|" + routes,
+		"ipv6.dns|" + dns,
+		"ipv6.route-metric|",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+}
