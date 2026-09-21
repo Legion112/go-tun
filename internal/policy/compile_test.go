@@ -460,7 +460,12 @@ func TestCompile_FailClosedStillBlackholes(t *testing.T) {
 	}
 }
 
-func TestCompile_IPv6NotTouchedByDefault(t *testing.T) {
+// TestCompile_IPv6NotDisabledByDefault is about the kill switch, not about
+// classification: no disable_ipv6 sysctl and no blanket drop rule unless
+// -drop-ipv6 asks for them. Whether IPv6 is classified is a separate question,
+// covered in ipv6_test.go -- this policy has no IPv6 prefixes and a peer that
+// cannot carry IPv6, so Auto correctly declines.
+func TestCompile_IPv6NotDisabledByDefault(t *testing.T) {
 	st, err := policy.Compile(testPolicy(true))
 	if err != nil {
 		t.Fatal(err)
