@@ -50,20 +50,42 @@ func (f *flagPrefixes) Set(v string) error {
 	if err != nil {
 		return fmt.Errorf("invalid -lan %q: %w", v, err)
 	}
-	if !p.Addr().Is4() {
-		return fmt.Errorf("invalid -lan %q: IPv4 only", v)
+	if p.Addr().Is4In6() {
+		return fmt.Errorf("invalid -lan %q: write a 4-in-6 prefix as plain IPv4", v)
 	}
 	*f = append(*f, p.Masked())
 	return nil
 }
 
+// parseAddrFlag accepts either family. Flags that genuinely require one use
+// parseAddr4Flag or parseAddr6Flag, so each states its own contract rather
+// than every address flag inheriting an IPv4 assumption.
 func parseAddrFlag(name, v string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(strings.TrimSpace(v))
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("invalid -%s %q: %w", name, v, err)
 	}
+	return a.Unmap(), nil
+}
+
+func parseAddr4Flag(name, v string) (netip.Addr, error) {
+	a, err := parseAddrFlag(name, v)
+	if err != nil {
+		return netip.Addr{}, err
+	}
 	if !a.Is4() {
 		return netip.Addr{}, fmt.Errorf("invalid -%s %q: IPv4 only", name, v)
+	}
+	return a, nil
+}
+
+func parseAddr6Flag(name, v string) (netip.Addr, error) {
+	a, err := parseAddrFlag(name, v)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if !a.Is6() {
+		return netip.Addr{}, fmt.Errorf("invalid -%s %q: IPv6 only", name, v)
 	}
 	return a, nil
 }
@@ -81,6 +103,13 @@ func runEnable(args []string, w io.Writer) error {
 	gateway := fs.String("gateway", DefaultGateway, "gotun gateway to send off-LAN traffic to")
 	dns := fs.String("dns", DefaultDNS, "DNS server to pin")
 	probe := fs.String("probe", DefaultProbe, "off-LAN address used to assert the default route moved")
+	manageV6 := fs.Bool("ipv6", true, "manage the IPv6 half too; false leaves IPv6 egressing the ISP directly")
+	gateway6 := fs.String("gateway6", "auto",
+		"gotun gateway's IPv6 address; auto finds it from the IPv4 gateway's link-layer address")
+	dns6 := fs.String("dns6", "",
+		"DNS server to pin for IPv6; empty writes none, since the pinned IPv4 resolver answers AAAA too")
+	probe6 := fs.String("probe6", DefaultProbe6, "off-LAN IPv6 address used to assert the default route moved")
+	strictV6 := fs.Bool("ipv6-strict", false, "treat IPv6 problems as failures that roll back, not warnings")
 	statePath := fs.String("state", DefaultStatePath, "path to the saved-settings state file")
 	connection := fs.String("connection", "", "NM connection to modify (default: the one carrying the default route)")
 	applyMode := fs.String("apply-mode", string(ApplyDevice), "how far to write the change: device|temporary|persistent")
@@ -95,17 +124,35 @@ func runEnable(args []string, w io.Writer) error {
 		return err
 	}
 
-	gw, err := parseAddrFlag("gateway", *gateway)
+	gw, err := parseAddr4Flag("gateway", *gateway)
 	if err != nil {
 		return err
 	}
-	dnsAddr, err := parseAddrFlag("dns", *dns)
+	dnsAddr, err := parseAddr4Flag("dns", *dns)
 	if err != nil {
 		return err
 	}
-	probeAddr, err := parseAddrFlag("probe", *probe)
+	probeAddr, err := parseAddr4Flag("probe", *probe)
 	if err != nil {
 		return err
+	}
+	// "auto" means discover it from the gateway's link-layer address; an
+	// explicit address short-circuits that.
+	var gw6, dns6Addr, probe6Addr netip.Addr
+	if v := strings.TrimSpace(*gateway6); v != "" && v != "auto" {
+		if gw6, err = parseAddr6Flag("gateway6", v); err != nil {
+			return err
+		}
+	}
+	if v := strings.TrimSpace(*dns6); v != "" {
+		if dns6Addr, err = parseAddr6Flag("dns6", v); err != nil {
+			return err
+		}
+	}
+	if v := strings.TrimSpace(*probe6); v != "" {
+		if probe6Addr, err = parseAddr6Flag("probe6", v); err != nil {
+			return err
+		}
 	}
 	mode, err := ParseApplyMode(*applyMode)
 	if err != nil {
@@ -120,6 +167,11 @@ func runEnable(args []string, w io.Writer) error {
 		Gateway:        gw,
 		DNS:            dnsAddr,
 		Probe:          probeAddr,
+		Gateway6:       gw6,
+		DNS6:           dns6Addr,
+		Probe6:         probe6Addr,
+		ManageV6:       *manageV6,
+		StrictV6:       *strictV6,
 		ExtraLANs:      lans,
 		StatePath:      *statePath,
 		ConnectionID:   *connection,

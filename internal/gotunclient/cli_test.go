@@ -43,8 +43,21 @@ func TestFlagPrefixes_RejectsMalformed(t *testing.T) {
 	if err := f.Set("192.168.8.1"); err == nil {
 		t.Fatal("a bare address is not a prefix")
 	}
-	if err := f.Set("2001:db8::/32"); err == nil {
-		t.Fatal("IPv6 should be rejected")
+	if err := f.Set("::ffff:10.0.0.0/104"); err == nil {
+		t.Fatal("a 4-in-6 prefix should be rejected: it reads as IPv6 but denotes IPv4")
+	}
+}
+
+// TestFlagPrefixes_AcceptsIPv6 is the inverse of what -lan used to enforce.
+// Once the client points ::/0 at the gateway, an IPv6 LAN prefix needs
+// protecting for exactly the reason an IPv4 one does.
+func TestFlagPrefixes_AcceptsIPv6(t *testing.T) {
+	var f flagPrefixes
+	if err := f.Set("2001:db8::/32"); err != nil {
+		t.Fatalf("IPv6 prefix rejected: %v", err)
+	}
+	if f[0].String() != "2001:db8::/32" {
+		t.Fatalf("got %s", f[0])
 	}
 }
 
@@ -65,8 +78,28 @@ func TestParseAddrFlag(t *testing.T) {
 	if _, err := parseAddrFlag("gateway", "nope"); err == nil {
 		t.Fatal("want error")
 	}
-	if _, err := parseAddrFlag("gateway", "2001:db8::1"); err == nil {
-		t.Fatal("IPv6 should be rejected")
+	// The family-neutral parser now accepts both; the flags that require one
+	// enforce it themselves, so each states its own contract.
+	if _, err := parseAddrFlag("ru-ip", "2001:db8::1"); err != nil {
+		t.Fatalf("IPv6 rejected by the family-neutral parser: %v", err)
+	}
+}
+
+func TestParseAddr4Flag_RejectsIPv6(t *testing.T) {
+	if _, err := parseAddr4Flag("gateway", "2001:db8::1"); err == nil {
+		t.Fatal("-gateway must stay IPv4; -gateway6 is the IPv6 one")
+	}
+	if _, err := parseAddr4Flag("gateway", "192.168.8.162"); err != nil {
+		t.Fatalf("valid IPv4 rejected: %v", err)
+	}
+}
+
+func TestParseAddr6Flag_RejectsIPv4(t *testing.T) {
+	if _, err := parseAddr6Flag("gateway6", "192.168.8.162"); err == nil {
+		t.Fatal("-gateway6 must be an IPv6 address")
+	}
+	if _, err := parseAddr6Flag("gateway6", "2001:db8::1"); err != nil {
+		t.Fatalf("valid IPv6 rejected: %v", err)
 	}
 }
 

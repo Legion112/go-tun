@@ -76,6 +76,26 @@ type VerifyOptions struct {
 
 var ipRE = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 
+// ip6RE is necessarily loose -- it will match fragments of surrounding text --
+// so every hit is validated with netip.ParseAddr before being believed.
+var ip6RE = regexp.MustCompile(`\b(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}\b`)
+
+// dialNetwork picks the transport for a pinned check.
+//
+// The unpinned case stays "tcp4" on purpose. The existing egress checks are an
+// IPv4 proof, and letting them silently drift onto IPv6 would change what a
+// passing check means rather than adding coverage.
+func dialNetwork(pin netip.Addr) string {
+	switch {
+	case pin.Is4() || pin.Is4In6():
+		return "tcp4"
+	case pin.Is6():
+		return "tcp6"
+	default:
+		return "tcp4"
+	}
+}
+
 // Verify runs the client-side proof matrix and reports each check. It returns a
 // non-nil error when any check failed, so it works as a single exit-code gate.
 func Verify(r linux.Runner, w io.Writer, o VerifyOptions) error {
@@ -209,7 +229,7 @@ func pinnedClient(pin netip.Addr, timeout time.Duration) *http.Client {
 				}
 				addr = net.JoinHostPort(pin.String(), port)
 			}
-			return dialer.DialContext(ctx, "tcp4", addr)
+			return dialer.DialContext(ctx, dialNetwork(pin), addr)
 		},
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2: true,

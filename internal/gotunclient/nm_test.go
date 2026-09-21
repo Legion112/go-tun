@@ -1,6 +1,7 @@
 package gotunclient
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -277,5 +278,134 @@ func TestDeviceDNS_ParsesIndexedFields(t *testing.T) {
 	}
 	if len(dns) != 2 || dns[0] != "192.168.8.1" || dns[1] != "1.1.1.1" {
 		t.Fatalf("got %q", dns)
+	}
+}
+
+// fixtureAutoDHCPDual is a dual-stack profile. fixtureAutoDHCP is deliberately
+// left alone: it is captured from real hardware and is now also the regression
+// fixture for "no ipv6.method line", which is what every version 1 state file
+// and every IPv4-only profile looks like.
+const fixtureAutoDHCPDual = `ipv4.method:auto
+ipv4.gateway:
+ipv4.dns:
+ipv4.ignore-auto-dns:no
+ipv4.never-default:no
+ipv4.routes:
+ipv4.route-metric:-1
+ipv6.ignore-auto-dns:no
+ipv6.method:auto
+ipv6.dns:
+ipv6.never-default:no
+ipv6.routes:
+ipv6.route-metric:-1
+`
+
+func TestParseNMProps_DualStack(t *testing.T) {
+	p, err := parseNMProps(fixtureAutoDHCPDual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IPv6 == nil {
+		t.Fatal("a profile with ipv6.method must capture an IPv6 snapshot")
+	}
+	if p.IPv6.Method != "auto" {
+		t.Fatalf("ipv6.method: %q", p.IPv6.Method)
+	}
+	if p.IPv6.NeverDefault {
+		t.Fatal("ipv6.never-default was no")
+	}
+	if p.IPv6.Routes != nil || p.IPv6.DNS != nil {
+		t.Fatalf("unset properties must stay nil: %+v", p.IPv6)
+	}
+	if p.IPv6.RouteMetric != nil {
+		t.Fatal("-1 is nmcli's unset sentinel for route-metric")
+	}
+	if !p.ManagesIPv6() {
+		t.Fatal("method=auto means NM is configuring IPv6 here")
+	}
+}
+
+// TestParseNMProps_NoIPv6LineLeavesNil is the compatibility half: a profile
+// that never mentions ipv6.method must leave the snapshot nil, so disable
+// emits no IPv6 arguments and cannot clear what it never captured.
+func TestParseNMProps_NoIPv6LineLeavesNil(t *testing.T) {
+	p, err := parseNMProps(fixtureAutoDHCP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IPv6 != nil {
+		t.Fatalf("expected no IPv6 snapshot, got %+v", p.IPv6)
+	}
+	if p.ManagesIPv6() {
+		t.Fatal("no ipv6.method means there is no IPv6 to manage")
+	}
+}
+
+// TestManagesIPv6_RefusesToTurnIPv6On pins the rule that gotun never enables
+// IPv6 for someone who switched it off.
+func TestManagesIPv6_RefusesToTurnIPv6On(t *testing.T) {
+	for _, method := range []string{"disabled", "ignore", "link-local", ""} {
+		p := NMProps{IPv6: &NMPropsV6{Method: method}}
+		if p.ManagesIPv6() {
+			t.Fatalf("ipv6.method=%q must not be taken over", method)
+		}
+	}
+	for _, method := range []string{"auto", "dhcp", "manual"} {
+		p := NMProps{IPv6: &NMPropsV6{Method: method}}
+		if !p.ManagesIPv6() {
+			t.Fatalf("ipv6.method=%q should be managed", method)
+		}
+	}
+}
+
+// TestDetectGateway6_MatchesByLinkLayerAddress pins the discovery rule. The
+// IPv6 default route cannot be used for this: before enable it points at the
+// ISP router, not at gotun. The MAC is what ties the two addresses of one box
+// together.
+func TestDetectGateway6_MatchesByLinkLayerAddress(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip -4 neigh show 192.168.8.162 dev wlan0"] =
+		"192.168.8.162 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+	r.Outputs["ip -6 neigh show dev wlan0"] = strings.Join([]string{
+		"fe80::1 dev wlan0 lladdr 11:22:33:44:55:66 router REACHABLE",
+		"fe80::aabb dev wlan0 lladdr aa:bb:cc:dd:ee:ff router REACHABLE",
+		"fd00:8::162 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE",
+	}, "\n")
+
+	got, err := DetectGateway6(r, "wlan0", netip.MustParseAddr("192.168.8.162"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ULA is preferred over the link-local one: a link-local nexthop
+	// constrains the route to a single device.
+	if got.String() != "fd00:8::162" {
+		t.Fatalf("got %s, want the global/ULA address", got)
+	}
+}
+
+func TestDetectGateway6_FallsBackToLinkLocal(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip -4 neigh show 192.168.8.162 dev wlan0"] =
+		"192.168.8.162 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+	r.Outputs["ip -6 neigh show dev wlan0"] =
+		"fe80::aabb dev wlan0 lladdr aa:bb:cc:dd:ee:ff router REACHABLE"
+
+	got, err := DetectGateway6(r, "wlan0", netip.MustParseAddr("192.168.8.162"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != "fe80::aabb" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// TestDetectGateway6_UnknownNeighbourIsAnError makes the failure explicit, so
+// enable can say why IPv6 is being left alone rather than silently skipping it.
+func TestDetectGateway6_UnknownNeighbourIsAnError(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	// Unscripted commands return "", which is what a host with no neighbour
+	// entry looks like.
+	if _, err := DetectGateway6(r, "wlan0", netip.MustParseAddr("192.168.8.162")); err == nil {
+		t.Fatal("a missing neighbour entry must be reported, not guessed at")
 	}
 }

@@ -248,6 +248,18 @@ nmcli connection modify <con> ipv4.never-default yes \
 
 `+ipv4.routes` appends, so a pre-existing static route survives; `enable` refuses outright when `ipv4.routes` is already set unless `-force`.
 
+**The IPv6 half.** `enable` also points the IPv6 default at the gateway, adding `ipv6.never-default yes` and `+ipv6.routes "::/0 <gateway6>"`. Without it a dual-stack client keeps its IPv6 default on the ISP uplink and bypasses gotun for every IPv6-capable destination — and since clients prefer IPv6 when both families resolve, that is most traffic.
+
+`-gateway6` defaults to `auto`, which finds the gateway's IPv6 address by matching the link-layer address its IPv4 address answers with. The current IPv6 default route cannot be used for this: before `enable` it points at the ISP router, not at gotun.
+
+`ipv6.method` is deliberately never written, for the same reason `ipv4.gateway` is not — but the consequence is different and worth stating: flipping it would *turn IPv6 on* for someone who had switched it off. "IPv6 on by default" means gotun manages the IPv6 you have, never that it gives you IPv6. A profile set to `disabled`, `ignore` or `link-local` is left alone with a note.
+
+IPv6 verification failures are warnings, not rollbacks. Undoing a working IPv4 tunnel because NetworkManager would not move the IPv6 default would leave you with no tunnel at all; degrading the IPv6 half leaves the IPv4 one working and says so loudly. `-ipv6-strict` inverts that. `gotun-client status` prints `ipv6: NOT TUNNELED` whenever the host has an IPv6 default route that gotun is not managing, which is the only place that leak is visible after the fact.
+
+`-ipv6=false` opts out entirely. `ipv6.ignore-auto-dns yes` is still written in every case, as it was before IPv6 support: it stops the ISP's IPv6 resolver competing with the pinned one.
+
+The state file moved to version 2 to hold the IPv6 snapshot, and version 1 is still readable. A v1 snapshot has no IPv6 block, so `disable` emits exactly the arguments it always did — which is why the block is a nil-able pointer rather than an inline struct. A zero-valued struct would not read as "never captured", it would read as "`ipv6.routes` was unset", and restoring it would clear static IPv6 routes gotun never touched.
+
 **`-apply-mode`** is an escalation ladder, so the risky form is never the first one tried:
 
 | Mode | Command | Link bounce | Survives reboot | Revert |
