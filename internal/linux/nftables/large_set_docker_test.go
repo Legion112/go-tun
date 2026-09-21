@@ -24,7 +24,9 @@ func TestLargeRUSet_DockerNftApply(t *testing.T) {
 	if os.Getenv("GOTUN_LARGE_SET") == "" {
 		t.Skip("set GOTUN_LARGE_SET=1 to run (make test-large-set)")
 	}
-	prefs := testutil.LoadAllRUfromMMDB(t)
+	// IPv4 only for now; the dual-stack large-set test arrives with the
+	// family-aware compiler.
+	prefs := testutil.LoadRUv4FromMMDB(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

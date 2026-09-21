@@ -1,6 +1,7 @@
 package prefixes
 
 import (
+	"math/big"
 	"net/netip"
 	"path/filepath"
 	"reflect"
@@ -84,8 +85,8 @@ func TestCollapseIPv4_OverlappingUnionOracle(t *testing.T) {
 	in := mustPrefs(t, "10.0.0.0/8", "10.1.0.0/16")
 	got := CollapseIPv4(in)
 	assertSameIPv4Union(t, in, got)
-	if unionAddressCount(prefixesToMergedIntervals(got)) != 1<<24 {
-		t.Fatalf("want 2^24 addresses, got %d", unionAddressCount(prefixesToMergedIntervals(got)))
+	if n := unionAddressCount(prefixesToMergedIntervals(t, got)); n.Cmp(big.NewInt(1<<24)) != 0 {
+		t.Fatalf("want 2^24 addresses, got %s", n)
 	}
 }
 

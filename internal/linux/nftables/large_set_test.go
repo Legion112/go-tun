@@ -33,7 +33,9 @@ func TestRenderFullTable_BatchesElements(t *testing.T) {
 }
 
 func TestLargeRUSet_CompileAndRender(t *testing.T) {
-	prefs := testutil.LoadAllRUfromMMDB(t)
+	// IPv4 only for now; the dual-stack large-set test arrives with the
+	// family-aware compiler.
+	prefs := testutil.LoadRUv4FromMMDB(t)
 
 	start := time.Now()
 	st, err := policy.Compile(policy.Policy{

@@ -1,0 +1,4 @@
+# synthetic RU IPv6 nets for lab
+fd00:200::/64
+fd00:201::/64
+2a02:6b8::/32

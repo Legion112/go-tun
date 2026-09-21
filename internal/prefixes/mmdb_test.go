@@ -1,6 +1,7 @@
 package prefixes_test
 
 import (
+	"net/netip"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -38,13 +39,38 @@ func TestExtractCountryFromMMDB_LiveOptional(t *testing.T) {
 	if err != nil {
 		t.Skipf("local MMDB not available at data/geo/GeoIP2-City.mmdb: %v", err)
 	}
-	if len(prefs) < 100 {
-		t.Fatalf("expected many RU prefixes from City MMDB, got %d", len(prefs))
+	var n4, n6 int
+	// The aliased copies of the IPv4 tree that SkipAliasedNetworks suppresses.
+	// If one ever reaches the direct set it matches no traffic, while looking
+	// like the IPv4 entry it duplicates is accounted for.
+	aliases := []netip.Prefix{
+		netip.MustParsePrefix("::ffff:0:0/96"),
+		netip.MustParsePrefix("2002::/16"),
+		netip.MustParsePrefix("2001::/32"),
 	}
 	for _, p := range prefs {
-		if !p.Addr().Is4() {
-			t.Fatalf("expected IPv4 only, got %s", p)
+		if !p.IsValid() {
+			t.Fatalf("invalid prefix %s", p)
+		}
+		if p.Addr().Is4In6() {
+			t.Fatalf("4-in-6 prefix %s leaked into the direct set", p)
+		}
+		if p.Addr().Is4() {
+			n4++
+			continue
+		}
+		n6++
+		for _, a := range aliases {
+			if a.Overlaps(p) {
+				t.Fatalf("aliased IPv4 space %s leaked in as IPv6 %s", a, p)
+			}
 		}
 	}
-	t.Logf("extracted %d RU IPv4 prefixes", len(prefs))
+	if n4 < 1000 {
+		t.Fatalf("expected many RU IPv4 prefixes from City MMDB, got %d", n4)
+	}
+	if n6 < 100 {
+		t.Fatalf("expected RU IPv6 prefixes from City MMDB, got %d", n6)
+	}
+	t.Logf("extracted %d RU IPv4 and %d RU IPv6 prefixes", n4, n6)
 }
