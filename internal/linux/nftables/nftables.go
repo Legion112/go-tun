@@ -107,6 +107,70 @@ func semanticMatchJSON(out string, spec policy.NftSpec) bool {
 }
 
 func semanticMatch(live liveNft, spec policy.NftSpec) bool {
+	return desiredPresent(live, spec) && !hasExtraObjects(live, spec)
+}
+
+// hasExtraObjects reports whether the live table carries objects the spec does
+// not want.
+//
+// Without this, drift detection is one-directional: it asks "is everything I
+// want present?" and never "is anything here that should not be?". Turning a
+// feature off -- -ipv6 off after an apply that classified IPv6, or dropping
+// -direct-snat -- would then leave its set and its rules in the live table
+// forever while apply cheerfully reported 0 changes. Since reconciliation is
+// delete-and-rewrite, noticing is the only mechanism that removes anything.
+//
+// The desired comment multiset comes from running the real renderer and the
+// real comment extractor, so render and readback cannot drift apart, and the
+// per-prefix exclude fan-out and per-interface SNAT fan-out are counted
+// automatically rather than restated here.
+func hasExtraObjects(live liveNft, spec policy.NftSpec) bool {
+	want := map[string]bool{}
+	for _, set := range spec.Sets {
+		want[set.Name] = true
+	}
+	for name := range live.sets {
+		if !want[name] {
+			return true
+		}
+	}
+
+	wantChains := map[string]policy.NftChainSpec{}
+	for _, ch := range spec.Chains {
+		wantChains[ch.Name] = ch
+	}
+	for name := range live.chains {
+		if _, ok := wantChains[name]; !ok {
+			return true
+		}
+	}
+
+	liveCounts := map[string]map[string]int{}
+	for _, r := range live.rules {
+		if _, ok := liveCounts[r.Chain]; !ok {
+			liveCounts[r.Chain] = map[string]int{}
+		}
+		liveCounts[r.Chain][r.Comment]++
+	}
+	for name, ch := range wantChains {
+		wantCounts := map[string]int{}
+		for _, line := range renderRuleLines(ch) {
+			wantCounts[ruleCommentText(line)]++
+		}
+		have := liveCounts[name]
+		if len(have) != len(wantCounts) {
+			return true
+		}
+		for cmt, n := range wantCounts {
+			if have[cmt] != n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func desiredPresent(live liveNft, spec policy.NftSpec) bool {
 	if live.sets == nil {
 		live.sets = map[string]map[string]struct{}{}
 	}
@@ -152,20 +216,24 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 	case want.Description == "mark-non-direct":
 		wantLAN := map[string]struct{}{}
 		for _, p := range want.ExcludePrefixes {
-			wantLAN[p.String()] = struct{}{}
+			wantLAN[normalizeDAddr(p.String())] = struct{}{}
 		}
 		wantEP := map[string]struct{}{}
 		for _, a := range want.ExcludeAddrs {
-			wantEP[a.String()] = struct{}{}
+			wantEP[normalizeDAddr(a.String())] = struct{}{}
 		}
-		if !stringSetsEqual(daddrsForComment(rules, chain, "exclude-lan"), wantLAN) {
+		if !stringSetsEqual(daddrsForComment(rules, chain, RuleComment("exclude-lan", want.Family)), wantLAN) {
 			return false
 		}
-		if !stringSetsEqual(daddrsForComment(rules, chain, "exclude-endpoint"), wantEP) {
+		if !stringSetsEqual(daddrsForComment(rules, chain, RuleComment("exclude-endpoint", want.Family)), wantEP) {
 			return false
 		}
+		if want.DropNonDirect {
+			return countComments(rules, chain, RuleComment("drop-non-direct", want.Family)) >= 1
+		}
+		verdict := RuleComment("mark-non-direct", want.Family)
 		for _, r := range rules {
-			if r.Chain == chain && r.Comment == "mark-non-direct" {
+			if r.Chain == chain && r.Comment == verdict {
 				return r.Mark != nil && *r.Mark == want.Mark
 			}
 		}
@@ -196,15 +264,19 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 		// silently reinstating the bug this rule exists to fix.
 		wantSkip := map[string]struct{}{}
 		for _, p := range want.ExcludePrefixes {
-			wantSkip[p.String()] = struct{}{}
+			wantSkip[normalizeDAddr(p.String())] = struct{}{}
 		}
-		if !stringSetsEqual(daddrsForComment(rules, chain, "snat-skip-lan"), wantSkip) {
+		if !stringSetsEqual(daddrsForComment(rules, chain, RuleComment("snat-skip-lan", want.Family)), wantSkip) {
 			return false
 		}
+		// Counted per family. The comment carries the family, so the count
+		// below stays "one rule per interface" even when a dual-stack policy
+		// emits an IPv4 and an IPv6 masquerade for the same interface.
+		snat := RuleComment("snat-direct", want.Family)
 		haveOIf := map[string]struct{}{}
 		n := 0
 		for _, r := range rules {
-			if r.Chain != chain || r.Comment != "snat-direct" {
+			if r.Chain != chain || r.Comment != snat {
 				continue
 			}
 			n++
@@ -226,8 +298,9 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 		}
 		return stringSetsEqual(haveOIf, wantOIf)
 	case want.Description == "isolate-inbound-from-home":
+		isolate := RuleComment("isolate-inbound-from-home", want.Family)
 		for _, r := range rules {
-			if r.Chain != chain || r.Comment != "isolate-inbound-from-home" {
+			if r.Chain != chain || r.Comment != isolate {
 				continue
 			}
 			if want.IIfName != "" && !containsStr(r.IIfNames, want.IIfName) {
@@ -240,7 +313,7 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 		}
 		return false
 	default:
-		return countComments(rules, chain, want.Description) >= 1
+		return countComments(rules, chain, RuleComment(want.Description, want.Family)) >= 1
 	}
 }
 
@@ -270,10 +343,31 @@ func daddrsForComment(rules []liveRule, chain, comment string) map[string]struct
 			continue
 		}
 		for _, d := range r.DAddrs {
-			out[d] = struct{}{}
+			out[normalizeDAddr(d)] = struct{}{}
 		}
 	}
 	return out
+}
+
+// normalizeDAddr puts a destination match into canonical prefix form.
+//
+// nft prints a full-length prefix as a bare address, so ::1/128 comes back as
+// "::1" and 10.10.0.2/32 as "10.10.0.2". The desired side is built from a mix
+// of netip.Prefix and netip.Addr values, which stringify differently, so both
+// sides are normalized here rather than each caller guessing. Without it the
+// exclude lists never compare equal and the table is rebuilt on every apply --
+// the same defect that bare set elements once caused.
+func normalizeDAddr(s string) string {
+	if strings.Contains(s, "/") {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			return p.Masked().String()
+		}
+		return s
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		return netip.PrefixFrom(a, a.BitLen()).String()
+	}
+	return s
 }
 
 func stringSetsEqual(a, b map[string]struct{}) bool {
@@ -417,11 +511,23 @@ func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
 	if m, ok := findMarkInExpr(rule.Expr); ok {
 		r.Mark = &m
 	}
-	r.DAddrs = findDAddrsInExpr(rule.Expr)
+	// A destination compared against a named set comes back as the string
+	// "@name". It is a set reference, not an address, so it belongs in
+	// SetNames -- which is where the text parser puts it, and where
+	// liveHasRule looks for it. Leaving it in DAddrs meant the JSON path never
+	// matched isolate-inbound-from-home at all, for either family, and the
+	// forward chain was rebuilt on every apply on any box with JSON support.
+	for _, d := range findDAddrsInExpr(rule.Expr) {
+		if name, ok := strings.CutPrefix(d, "@"); ok {
+			r.SetNames = append(r.SetNames, name)
+			continue
+		}
+		r.DAddrs = append(r.DAddrs, d)
+	}
 	r.IIfNames = findIIfNamesInExpr(rule.Expr)
 	r.OIfNames = findOIfNamesInExpr(rule.Expr)
 	r.Masquerade = hasNATStmtInExpr(rule.Expr)
-	r.SetNames = findSetNamesInExpr(rule.Expr)
+	r.SetNames = append(r.SetNames, findSetNamesInExpr(rule.Expr)...)
 	return r, rule.Chain != ""
 }
 
@@ -509,8 +615,7 @@ func isIPDAddrPayload(left json.RawMessage) bool {
 			Field    string `json:"field"`
 		} `json:"payload"`
 	}
-	if json.Unmarshal(left, &payloadWrap) == nil &&
-		payloadWrap.Payload.Protocol == "ip" && payloadWrap.Payload.Field == "daddr" {
+	if json.Unmarshal(left, &payloadWrap) == nil && isDAddrProto(payloadWrap.Payload.Protocol, payloadWrap.Payload.Field) {
 		return true
 	}
 	// Some nft versions nest as {"payload":{...}} already unwrapped above;
@@ -519,7 +624,18 @@ func isIPDAddrPayload(left json.RawMessage) bool {
 		Protocol string `json:"protocol"`
 		Field    string `json:"field"`
 	}
-	return json.Unmarshal(left, &payload) == nil && payload.Protocol == "ip" && payload.Field == "daddr"
+	return json.Unmarshal(left, &payload) == nil && isDAddrProto(payload.Protocol, payload.Field)
+}
+
+// isDAddrProto accepts both families.
+//
+// Requiring protocol=="ip" made every ip6 daddr match invisible to the JSON
+// parser: the exclude lists for IPv6 came back empty, never matched the spec,
+// and the whole table was deleted and rebuilt on every apply. The text parser
+// has the opposite blind spot -- it cannot tell the two apart at all -- which
+// is why rule comments carry the family. See RuleComment.
+func isDAddrProto(protocol, field string) bool {
+	return (protocol == "ip" || protocol == "ip6") && field == "daddr"
 }
 
 func matchRightToString(right json.RawMessage) (string, bool) {
@@ -719,7 +835,15 @@ func RenderFullTable(spec policy.NftSpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "add table %s %s\n", spec.Family, spec.Table)
 	for _, set := range spec.Sets {
-		fmt.Fprintf(&b, "add set %s %s %s { type %s; flags interval; }\n", spec.Family, spec.Table, set.Name, set.Type)
+		// Flags come from the spec rather than being hardcoded: they were
+		// already carried, sorted and compared by policy.normalize, but never
+		// reached the wire, so a set that wanted different flags silently got
+		// interval anyway.
+		flags := ""
+		if len(set.Flags) > 0 {
+			flags = "flags " + strings.Join(set.Flags, ",") + "; "
+		}
+		fmt.Fprintf(&b, "add set %s %s %s { type %s; %s}\n", spec.Family, spec.Table, set.Name, set.Type, flags)
 		writeBatchedElements(&b, spec.Family, spec.Table, set.Name, prefixesToStrings(set))
 	}
 	for _, chain := range spec.Chains {
@@ -754,17 +878,28 @@ func writeBatchedElements(b *strings.Builder, family, table, setName string, ele
 func renderRuleLines(chain policy.NftChainSpec) []string {
 	var lines []string
 	for _, rule := range chain.Rules {
+		l3, fam := l3(rule.Family), rule.Family
+		cmt := func(desc string) string { return RuleComment(desc, fam) }
 		switch {
 		case rule.DropIPv6:
 			lines = append(lines, `meta nfproto ipv6 drop comment "drop-ipv6"`)
 		case rule.Description == "mark-non-direct":
 			for _, p := range rule.ExcludePrefixes {
-				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "exclude-lan"`, p.String()))
+				lines = append(lines, fmt.Sprintf(`%s daddr %s return comment %q`, l3, p.String(), cmt("exclude-lan")))
 			}
 			for _, a := range rule.ExcludeAddrs {
-				lines = append(lines, fmt.Sprintf(`ip daddr %s counter return comment "exclude-endpoint"`, a.String()))
+				lines = append(lines, fmt.Sprintf(`%s daddr %s counter return comment %q`, l3, a.String(), cmt("exclude-endpoint")))
 			}
-			lines = append(lines, fmt.Sprintf(`ip daddr != @%s meta mark set 0x%x comment "mark-non-direct"`, rule.DirectSet, rule.Mark))
+			if rule.DropNonDirect {
+				// The verdict is drop rather than mark: nothing can carry this
+				// family to the exit hop, and letting it out the uplink is the
+				// leak this fallback exists to refuse.
+				lines = append(lines, fmt.Sprintf(`%s daddr != @%s counter drop comment %q`,
+					l3, rule.DirectSet, cmt("drop-non-direct")))
+				break
+			}
+			lines = append(lines, fmt.Sprintf(`%s daddr != @%s meta mark set 0x%x comment %q`,
+				l3, rule.DirectSet, rule.Mark, cmt("mark-non-direct")))
 		case rule.Description == "only-marked-ingress":
 			// Return early for any interface gotun does not steer, so WAN-inbound
 			// traffic never reaches the mark rule or walks the direct set.
@@ -779,18 +914,19 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 				strings.Join(quoted, ", ")))
 		case rule.Description == "snat-direct":
 			for _, pfx := range rule.ExcludePrefixes {
-				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "snat-skip-lan"`, pfx.String()))
+				lines = append(lines, fmt.Sprintf(`%s daddr %s return comment %q`, l3, pfx.String(), cmt("snat-skip-lan")))
 			}
 			if !rule.SNATMasquerade {
 				break
 			}
 			for _, oif := range rule.OIfNames {
 				lines = append(lines, fmt.Sprintf(
-					`meta nfproto ipv4 oifname %q fib saddr type != local counter masquerade comment "snat-direct"`,
-					oif))
+					`meta nfproto %s oifname %q fib saddr type != local counter masquerade comment %q`,
+					nfproto(fam), oif, cmt("snat-direct")))
 			}
 		case rule.Description == "isolate-inbound-from-home":
-			lines = append(lines, fmt.Sprintf(`iifname "%s" ip daddr @%s drop comment "isolate-inbound-from-home"`, rule.IIfName, rule.DropDstSet))
+			lines = append(lines, fmt.Sprintf(`iifname "%s" %s daddr @%s drop comment %q`,
+				rule.IIfName, l3, rule.DropDstSet, cmt("isolate-inbound-from-home")))
 		}
 	}
 	return lines

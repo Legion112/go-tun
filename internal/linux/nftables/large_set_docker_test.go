@@ -42,7 +42,7 @@ func TestLargeRUSet_DockerNftApply(t *testing.T) {
 	st, err := policy.Compile(policy.Policy{
 		DirectPrefixes:  prefs,
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.20.0.3"),
+		TunnelEndpoints:  []netip.Addr{netip.MustParseAddr("10.20.0.3")},
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		FailMode:        policy.FailClosed,
 		TunnelUp:        false,

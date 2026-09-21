@@ -217,3 +217,70 @@ func WriteCIDRList(path string, prefixes []netip.Prefix) error {
 	}
 	return nil
 }
+
+// Families selects which address families a command emits.
+type Families struct{ V4, V6 bool }
+
+// ParseFamilies parses a -families flag value such as "v4", "v6" or "v4,v6".
+func ParseFamilies(s string) (Families, error) {
+	f := Families{}
+	for _, part := range strings.Split(s, ",") {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "":
+			continue
+		case "v4", "ipv4", "4":
+			f.V4 = true
+		case "v6", "ipv6", "6":
+			f.V6 = true
+		case "all", "both":
+			f.V4, f.V6 = true, true
+		default:
+			return Families{}, fmt.Errorf("unknown address family %q (want v4, v6 or v4,v6)", part)
+		}
+	}
+	if !f.V4 && !f.V6 {
+		return Families{}, fmt.Errorf("no address family selected")
+	}
+	return f, nil
+}
+
+func (f Families) String() string {
+	switch {
+	case f.V4 && f.V6:
+		return "v4,v6"
+	case f.V6:
+		return "v6"
+	default:
+		return "v4"
+	}
+}
+
+// FilterFamilies keeps only the prefixes whose family is selected.
+func FilterFamilies(prefs []netip.Prefix, f Families) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(prefs))
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			if f.V4 {
+				out = append(out, p)
+			}
+			continue
+		}
+		if f.V6 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// CountFamilies reports how many prefixes of each family are present, for the
+// per-family summaries the CLI prints.
+func CountFamilies(prefs []netip.Prefix) (v4, v6 int) {
+	for _, p := range prefs {
+		if p.Addr().Is4() {
+			v4++
+		} else {
+			v6++
+		}
+	}
+	return v4, v6
+}

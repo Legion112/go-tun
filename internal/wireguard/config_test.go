@@ -15,7 +15,7 @@ func wgSpec() policy.WireGuardSpec {
 		Interface:  "wg-exit",
 		PrivateKey: "PRIVKEY",
 		ListenPort: 51820,
-		Address:    netip.MustParsePrefix("10.99.0.1/30"),
+		Addresses:  []netip.Prefix{netip.MustParsePrefix("10.99.0.1/30")},
 		Managed:    true,
 		Up:         true,
 		Peer: policy.WireGuardPeer{
@@ -38,7 +38,7 @@ func TestReconcile_SemanticMatchNoChanges(t *testing.T) {
 	r := linux.NewRecordingRunner()
 	r.Outputs["ip link show dev wg-exit"] = "2: wg-exit: <POINTOPOINT,UP,LOWER_UP>"
 	r.Outputs["wg show wg-exit dump"] = matchingDump()
-	r.Outputs["ip -4 addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
+	r.Outputs["ip addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
 	n, err := wireguard.Reconcile(r, wgSpec())
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestReconcile_EndpointChangeForcesReapply(t *testing.T) {
 	dump := "PRIVKEY\tLOCALPUB\t51820\toff\n" +
 		"PEERPUB\t(none)\t10.20.0.9:51820\t10.30.0.0/24,10.99.0.0/30\t0\t0\t0\t5\n"
 	r.Outputs["wg show wg-exit dump"] = dump
-	r.Outputs["ip -4 addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
+	r.Outputs["ip addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
 	n, err := wireguard.Reconcile(r, wgSpec())
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestReconcile_AllowedIPsChangeForcesReapply(t *testing.T) {
 	dump := "PRIVKEY\tLOCALPUB\t51820\toff\n" +
 		"PEERPUB\t(none)\t10.20.0.3:51820\t10.30.0.0/24\t0\t0\t0\t5\n"
 	r.Outputs["wg show wg-exit dump"] = dump
-	r.Outputs["ip -4 addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
+	r.Outputs["ip addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
 	n, err := wireguard.Reconcile(r, wgSpec())
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestReconcile_ListenPortChangeForcesReapply(t *testing.T) {
 	dump := "PRIVKEY\tLOCALPUB\t51821\toff\n" +
 		"PEERPUB\t(none)\t10.20.0.3:51820\t10.30.0.0/24,10.99.0.0/30\t0\t0\t0\t5\n"
 	r.Outputs["wg show wg-exit dump"] = dump
-	r.Outputs["ip -4 addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
+	r.Outputs["ip addr show dev wg-exit"] = "inet 10.99.0.1/30 scope global wg-exit"
 	n, err := wireguard.Reconcile(r, wgSpec())
 	if err != nil {
 		t.Fatal(err)

@@ -41,7 +41,7 @@ func TestDirectSNAT_RealNftRoundTrip(t *testing.T) {
 	st, err := policy.Compile(policy.Policy{
 		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
 		TunnelInterface: "wg-exit",
-		TunnelEndpoint:  netip.MustParseAddr("10.20.0.3"),
+		TunnelEndpoints:  []netip.Addr{netip.MustParseAddr("10.20.0.3")},
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		LANIfaces:       []string{"eth0"},
 		FailMode:        policy.FailClosed,
