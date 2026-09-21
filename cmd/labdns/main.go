@@ -17,7 +17,9 @@ import (
 	"codeberg.org/miekg/dns/rdata"
 )
 
-// labdns simulates a geo-based DNS server: A answers depend on query source IP.
+// labdns simulates a geo-based DNS server: answers depend on the query source
+// IP. A and AAAA are both served, each from the -map entries of its own family,
+// so one source CIDR can be given both by repeating -map.
 // Optional -truncate-udp returns TC=1 on UDP and the full answer on TCP.
 
 type geoRule struct {
@@ -29,7 +31,8 @@ func main() {
 	listen := flag.String("listen", ":53", "listen address")
 	truncateUDP := flag.Bool("truncate-udp", false, "set TC on UDP replies; full answer on TCP")
 	var maps flagStrings
-	flag.Var(&maps, "map", "sourceCIDR=answerIP (repeatable), e.g. -map 10.200.0.0/24=10.200.0.50")
+	flag.Var(&maps, "map", "sourceCIDR=answerIP (repeatable); the answer's family picks the "+
+		"record type, e.g. -map 10.200.0.0/24=10.200.0.50 -map fd00:200::/64=fd00:200::50")
 	flag.Parse()
 	if len(maps) == 0 {
 		fmt.Fprintln(os.Stderr, "labdns: at least one -map CIDR=IP is required")
@@ -147,17 +150,30 @@ func (h *geoHandler) handle(raw []byte, src netip.Addr, udp bool) []byte {
 		m.Rcode = dns.RcodeFormatError
 		return pack(m)
 	}
-	ans, ok := h.lookup(src)
+	// The qtype decides which family to answer with. Ignoring it and always
+	// returning an A record meant an AAAA query got an answer of the wrong
+	// type, which a resolver treats as a malformed reply rather than as "no
+	// such record".
+	_, wantV6 := req.Question[0].(*dns.AAAA)
+
+	ans, ok := h.lookup(src, wantV6)
 	if !ok {
+		if h.hasAnyRule(src) {
+			// A rule covers this source, just not for this family. That is
+			// NOERROR with an empty answer -- the correct way to say "no
+			// record of this type" -- and a dual-stack client then falls back
+			// to the other family instead of treating the name as missing.
+			return pack(m)
+		}
 		m.Rcode = dns.RcodeNameError
 		return pack(m)
 	}
 	name := req.Question[0].Header().Name
-	m.Answer = []dns.RR{
-		&dns.A{
-			Hdr: dns.Header{Name: name, Class: dns.ClassINET, TTL: 60},
-			A:   rdata.A{Addr: ans},
-		},
+	hdr := dns.Header{Name: name, Class: dns.ClassINET, TTL: 60}
+	if wantV6 {
+		m.Answer = []dns.RR{&dns.AAAA{Hdr: hdr, AAAA: rdata.AAAA{Addr: ans}}}
+	} else {
+		m.Answer = []dns.RR{&dns.A{Hdr: hdr, A: rdata.A{Addr: ans}}}
 	}
 	if h.truncateUDP && udp {
 		m.Truncated = true
@@ -166,16 +182,31 @@ func (h *geoHandler) handle(raw []byte, src netip.Addr, udp bool) []byte {
 	return pack(m)
 }
 
-func (h *geoHandler) lookup(src netip.Addr) (netip.Addr, bool) {
+// lookup finds the answer for a source address, restricted to the family the
+// query asked for.
+func (h *geoHandler) lookup(src netip.Addr, wantV6 bool) (netip.Addr, bool) {
 	if !src.IsValid() {
 		return netip.Addr{}, false
 	}
 	for _, rule := range h.rules {
-		if rule.net.Contains(src) {
+		if rule.net.Contains(src) && rule.addr.Is6() == wantV6 {
 			return rule.addr, true
 		}
 	}
 	return netip.Addr{}, false
+}
+
+// hasAnyRule reports whether any rule covers this source, regardless of family.
+func (h *geoHandler) hasAnyRule(src netip.Addr) bool {
+	if !src.IsValid() {
+		return false
+	}
+	for _, rule := range h.rules {
+		if rule.net.Contains(src) {
+			return true
+		}
+	}
+	return false
 }
 
 func pack(m *dns.Msg) []byte {
@@ -213,8 +244,9 @@ func parseMaps(vals []string) ([]geoRule, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !a.Is4() {
-			return nil, fmt.Errorf("answer must be IPv4: %s", a)
+		a = a.Unmap()
+		if a.Is4In6() {
+			return nil, fmt.Errorf("answer must be plain IPv4 or IPv6, not 4-in-6: %s", a)
 		}
 		out = append(out, geoRule{net: p, addr: a})
 	}

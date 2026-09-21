@@ -373,11 +373,17 @@ func TestPartialFailureThenReapply(t *testing.T) {
 	}
 }
 
+// TestIPv6NoBypass covers the IPv4-only lab, where no node asks for IPv6 and
+// the harness therefore disables it. It is not the IPv6 support test -- that is
+// TestIPv6NoBypass_Classified in topology6_test.go, which runs a dual-stack lab
+// and asserts IPv6 is classified rather than absent. This one stays because a
+// v4-only deployment is still a supported shape, and "no IPv6 anywhere" is the
+// property it relies on.
 func TestIPv6NoBypass(t *testing.T) {
 	tp := setupTopo(t)
 	ctx := context.Background()
 
-	// Client IPv6 disabled at container start; also gotun drops ip6
+	// Client IPv6 disabled at container start because this lab requested none.
 	out, _ := tp.lab.Exec(ctx, "client", "sysctl", "-n", "net.ipv6.conf.all.disable_ipv6")
 	if strings.TrimSpace(out) != "1" {
 		t.Fatalf("client ipv6 not disabled: %q", out)

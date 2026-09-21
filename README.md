@@ -83,9 +83,27 @@ v1 has **no** cross-subsystem transaction (nft + netlink + WireGuard). On mid-ap
 
 Packet classification remains **IP-destination based**. Companion **`gotun-dns`** provides domain-suffix split resolver egress (Direct vs Exit); see [Split DNS](#split-dns-gotun-dns). nft DNS redirect is still out of scope — clients must point DNS at the gateway explicitly.
 
-## IPv6 (v1)
+## IPv6
 
-No IPv6 split routing. Lab and apply disable/drop IPv6 so it cannot bypass policy. Full IPv6 support is TODO.
+IPv6 is classified exactly like IPv4, and it is on by default. Country prefixes go into `ru_nets6` (`type ipv6_addr`), non-direct IPv6 is marked with the same fwmark, and `ip -6 rule`/`ip -6 route` steer it into the same table number. Both families live in the one `inet gotun` table: `ip daddr` and `ip6 daddr` each carry an implicit nfproto dependency, so a packet only ever matches its own family's rules.
+
+This matters because the policy used to leak on every dual-stack destination. `gotun-dns` is qtype-blind and will return AAAA records for a `.ru` name; before this, nothing classified the address in that answer, so a client reached a "direct" site over IPv6 by whatever path the uplink offered. Clients prefer IPv6 when both families resolve, so that was the common path.
+
+```
+gotun apply -ipv6 auto|on|off -ipv6-fallback direct|blackhole|drop
+```
+
+`-ipv6 auto` (the default) classifies IPv6 only when it can actually work: the peer must carry IPv6 (a v6 route in `AllowedIPs` **and** a v6 address on the interface — a route with no source address is one the kernel cannot use), and the IPv6 direct set must be non-empty. The second condition is not a nicety: the classifier rule reads `ip6 daddr != @ru_nets6`, which against an empty set matches *everything*, so a gateway upgrading with a legacy IPv4-only `prefixes.txt` would push all of its IPv6 into the tunnel on the next apply.
+
+**`-ipv6-fallback direct` is the default and it leaks by design.** When the tunnel cannot carry IPv6, non-direct IPv6 egresses the ordinary uplink and every IPv6-capable destination sees your real address. It is the default because on a household gateway a half-broken internet is worse than a known leak, but it is silent — `apply` prints a warning whenever it engages. Use `-ipv6-fallback blackhole` if being seen matters more than IPv6 working.
+
+`-endpoint` takes a comma-separated list. A dual-stack peer reachable over both families needs both, or the IPv6 classifier marks the tunnel's own encapsulated packets and the tunnel eats itself.
+
+`-direct-snat6` is separate from `-direct-snat` and off by default: the hairpin/flow-offload argument for the IPv4 version is about NAT on a v4 LAN, whereas a routed IPv6 prefix wants no NAT66 at all. Only useful on a ULA-only LAN.
+
+Enabling classification writes `net.ipv6.conf.all.forwarding=1`. Note the side effect: the kernel then stops honouring Router Advertisements on interfaces left at `accept_ra=1`, so a WAN whose address comes from SLAAC needs `accept_ra=2`. gotun does not write that — the WAN belongs to netifd, not to the classifier.
+
+`-drop-ipv6` still works but is deprecated in favour of `-ipv6 off`, which leaves behind no `disable_ipv6` sysctls that `clear` cannot undo.
 
 ## Host isolation
 
@@ -167,7 +185,9 @@ gotun clear
 
 ### Prefix collapse (default)
 
-By default, `gotun fetch`, `gotun apply`, and `gotun amnezia` run **`CollapseIPv4`** at the configuration boundary: canonicalize, dedupe, drop covered prefixes, and merge sibling CIDRs. Coverage is unchanged (same IPv4 address union); only the representation shrinks (often ~70k → ~12k for a full RU extract). Low-level parsers stay uncollapsed so parse/extract tests remain exact. `gotun apply` also collapses whatever file you pass, so older unaggregated `prefixes.txt` files still benefit.
+By default, `gotun fetch`, `gotun apply`, and `gotun amnezia` run **`Collapse`** at the configuration boundary: canonicalize, dedupe, drop covered prefixes, and merge sibling CIDRs. Both families are handled; coverage is unchanged (the same address union per family) and only the representation shrinks. A full RU extract goes from ~72k to ~12k IPv4 prefixes and ~12k to ~4.6k IPv6 ones — the IPv6 side collapses less because MaxMind already records it near RIR allocation granularity (mostly /29 and /32).
+
+`gotun fetch -families v4,v6` selects which families to emit; it defaults to both. `gotun amnezia -families` defaults to **v4 alone**, because the consumer there is a third-party client whose handling of an IPv6 CIDR in those fields is unverified, and an import it rejects outright is worse than one that is merely incomplete. Low-level parsers stay uncollapsed so parse/extract tests remain exact. `gotun apply` also collapses whatever file you pass, so older unaggregated `prefixes.txt` files still benefit.
 
 ### Amnezia client export
 
@@ -298,7 +318,6 @@ Off by default. Enable with `-direct-snat true`.
 ## Out of scope (v1)
 
 - Userspace SOCKS/proxy
-- IPv6 split routing
 - nft/iptables forced DNS redirect
 - iptables+ipset backend
 - Fail-open on tunnel loss
@@ -309,7 +328,7 @@ Off by default. Enable with `-direct-snat true`.
 
 Do **not** implement these until the v1 core (build, unit tests, integration invariants) is green:
 
-- [ ] **IPv6 support** — `ru_nets6`, mark + policy routing; stop blanket disable/drop
+- [x] **IPv6 support** — `ru_nets6`, mark + policy routing; blanket disable/drop is no longer the default
 - [ ] **DNS → packet coupling** — learn Direct-path A/AAAA into TTL-bound `dns_direct_nets`
 - [ ] **Fail-open mode** — optional ISP fallback when WG is down
 - [ ] **Prefix source refresh** — scheduled/atomic MaxMind updates in production
