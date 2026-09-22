@@ -452,5 +452,17 @@ type WireGuardSpec struct {
 	Addresses  []netip.Prefix
 	Peer       WireGuardPeer
 	Managed    bool // if false, apply only assumes iface exists for routing
-	Up         bool // desired admin state; false => fail-closed (iface down, no AllowedIPs routes)
+	// Up is the desired admin state of the link.
+	//
+	// Deliberately separate from RouteAllowedIPs. Under fail-open a dead tunnel
+	// must stop carrying traffic while the interface stays up, because a
+	// WireGuard interface that is down sends no handshakes at all and so could
+	// never re-establish itself -- it would be permanently dead the moment the
+	// watchdog declared it dead once.
+	Up bool
+	// RouteAllowedIPs is whether the peer's AllowedIPs should exist as routes in
+	// the main table. It goes false whenever the tunnel must not carry traffic,
+	// independently of Up: leaving those routes behind on a dead tunnel would
+	// send anything inside AllowedIPs into it instead of out the uplink.
+	RouteAllowedIPs bool
 }

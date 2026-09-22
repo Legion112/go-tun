@@ -236,16 +236,20 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Addresses:  slices.Clone(p.WireGuard.Addresses),
 			Peer:       p.WireGuard.Peer,
 			Managed:    p.WireGuard.PrivateKey != "",
-			Up:         p.TunnelUp,
+			// Fail-open keeps the link up so the tunnel can re-establish itself;
+			// only the routes are withdrawn. Fail-closed still downs it.
+			Up:              p.TunnelUp || p.FailMode == FailOpen,
+			RouteAllowedIPs: p.TunnelUp,
 		},
 		WireGuardClients: WireGuardSpec{
-			Interface:  clientsIface,
-			PrivateKey: p.InboundWireGuard.PrivateKey,
-			ListenPort: p.InboundWireGuard.ListenPort,
-			Addresses:  slices.Clone(p.InboundWireGuard.Addresses),
-			Peer:       p.InboundWireGuard.Peer,
-			Managed:    inboundManaged,
-			Up:         inboundManaged, // listen iface stays up whenever managed
+			Interface:       clientsIface,
+			PrivateKey:      p.InboundWireGuard.PrivateKey,
+			ListenPort:      p.InboundWireGuard.ListenPort,
+			Addresses:       slices.Clone(p.InboundWireGuard.Addresses),
+			Peer:            p.InboundWireGuard.Peer,
+			Managed:         inboundManaged,
+			Up:              inboundManaged, // listen iface stays up whenever managed
+			RouteAllowedIPs: inboundManaged,
 		},
 	}
 

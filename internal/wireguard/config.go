@@ -27,17 +27,30 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		changes++
 	}
 
-	if !spec.Up {
-		// Fail-closed: remove AllowedIPs routes and bring interface down.
+	if !spec.RouteAllowedIPs {
+		// The tunnel must not carry traffic. Withdraw the AllowedIPs routes
+		// whether or not the link is also going down, or anything inside them
+		// keeps being routed into a tunnel that is not working.
 		for _, p := range spec.Peer.AllowedIPs {
 			if p.IsValid() {
 				_, _ = r.Run("ip", famFlag(p.Addr()), "route", "del", p.String(), "dev", iface)
 			}
 		}
+		changes++
+	}
+
+	if !spec.Up {
 		if _, err := r.Run("ip", "link", "set", "dev", iface, "down"); err != nil {
 			return changes, err
 		}
 		changes++
+		return changes, nil
+	}
+
+	if !spec.RouteAllowedIPs {
+		// Up but not carrying traffic: leave the peer configuration alone so
+		// WireGuard keeps retrying handshakes, and stop here so the routes just
+		// withdrawn are not immediately reinstalled below.
 		return changes, nil
 	}
 
