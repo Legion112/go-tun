@@ -1,0 +1,39 @@
+{
+  "log": { "level": "warn", "timestamp": true },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "xray0",
+      "address": [ "172.19.0.1/30" ],
+      "mtu": 1400,
+      "auto_route": false,
+      "strict_route": false,
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-out",
+      "server": "185.80.130.211",
+      "server_port": 443,
+      "uuid": "REPLACE-WITH-CLIENT-UUID",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.googletagmanager.com",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "NqCwpn7_frQx9WqRP460tp7zn4egHWMi60eASXruZks",
+          "short_id": "97e528437b40b426"
+        }
+      }
+    }
+  ],
+  "route": {
+    "final": "vless-out",
+    "auto_detect_interface": true
+  }
+}
