@@ -7,11 +7,13 @@ GOTUN_PREFIXES=/etc/gotun/prefixes.txt
 # tunnel cannot try to carry its own handshake. Comma-separated: a dual-stack
 # peer reachable over both families needs both listed, or the IPv6 classifier
 # marks the tunnel's own encapsulated packets.
+# Both the XRay server and any other tunnel endpoint must be listed, or the
+# router will classify a neighbouring tunnel's own packets and route them into
+# this one. Comma-separated.
 GOTUN_ENDPOINT=185.80.130.211
 
-# The device netifd created. It is named after the UCI interface section, and
-# UCI section names cannot contain hyphens -- so "wgexit", not "wg-exit".
-GOTUN_TUNNEL_IFACE=wgexit
+# The tun sing-box creates.
+GOTUN_TUNNEL_IFACE=xray0
 
 # Local CIDRs, excluded from marking. List the IPv6 prefix here too once the
 # LAN has one, or inbound WireGuard peers are not isolated from it.
@@ -29,7 +31,13 @@ GOTUN_MARK_IFACE=br-lan
 # closed: blackhole it instead.
 GOTUN_FAIL_MODE=open
 
-GOTUN_TUNNEL_UP=true
+# Health probe. TCP, not ICMP: sing-box answers pings locally from its own
+# stack, so a ping through the tunnel succeeds even when the tunnel is dead.
+GOTUN_PROBE_TARGET=1.1.1.1:443
+GOTUN_PROBE_INTERVAL=60s
+GOTUN_FAIL_AFTER=3
+GOTUN_RECOVER_AFTER=2
+GOTUN_IPV6=off
 
 # auto: classify IPv6 like IPv4, but only when it can actually work -- the peer
 #   must carry IPv6 and the prefix list must contain IPv6 entries. This is the

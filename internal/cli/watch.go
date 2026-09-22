@@ -97,6 +97,7 @@ func Watch(o WatchOptions) error {
 	w := tunnelwatch.New(linux.ExecRunner{}, tunnelwatch.DeviceDialer{}, apply, tunnelwatch.Config{
 		Iface:        iface,
 		Target:       o.ProbeTarget,
+		Table:        policy.DefaultTableID,
 		Interval:     o.Interval,
 		Timeout:      o.Timeout,
 		FailAfter:    o.FailAfter,

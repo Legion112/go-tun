@@ -37,6 +37,8 @@ func (f *fakeProbe) Probe(_ context.Context, iface, target string, _ time.Durati
 func upRunner() *linux.RecordingRunner {
 	r := linux.NewRecordingRunner()
 	r.Outputs["ip link show dev xray0"] = "9: xray0: <POINTOPOINT,UP,LOWER_UP> mtu 1400"
+	// The kernel agrees with the loop's belief: the tunnel route is installed.
+	r.Outputs["ip -4 route show table 100"] = "default dev xray0 scope link metric 10"
 	return r
 }
 
@@ -156,6 +158,35 @@ func TestWatch_FailedApplyIsRetried(t *testing.T) {
 	}
 	if !w.TunnelUp() {
 		t.Fatal("belief must not change when the apply failed")
+	}
+}
+
+// The route can vanish underneath the loop -- the transport restarting takes its
+// interface, and the device route with it -- while probes then succeed again, so
+// there is no transition to act on. Without a drift check the table stays empty
+// forever with everything reporting healthy: the same silent shape as the outage
+// this watchdog exists to prevent.
+func TestWatch_RepairsRouteLostWhileHealthy(t *testing.T) {
+	r := upRunner()
+	r.Outputs["ip -4 route show table 100"] = "" // route gone, belief still "up"
+	a := &applyLog{}
+	w := newWatcher(r, &fakeProbe{}, a, tunnelwatch.Config{})
+	w.Tick(context.Background())
+	if len(a.ups) != 1 || a.ups[0] != true {
+		t.Fatalf("a missing route under a healthy tunnel must be re-applied, got %v", a.ups)
+	}
+}
+
+// And it must stay quiet when the kernel already agrees, or it re-applies the
+// whole policy every minute forever.
+func TestWatch_NoRepairWhenKernelAgrees(t *testing.T) {
+	a := &applyLog{}
+	w := newWatcher(upRunner(), &fakeProbe{}, a, tunnelwatch.Config{})
+	for i := 0; i < 5; i++ {
+		w.Tick(context.Background())
+	}
+	if len(a.ups) != 0 {
+		t.Fatalf("no re-apply expected when the route is present: %v", a.ups)
 	}
 }
 

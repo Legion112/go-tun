@@ -3,6 +3,8 @@ package tunnelwatch
 import (
 	"context"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/legion/go-tun/internal/linux"
@@ -25,8 +27,11 @@ type Applier func(ctx context.Context, tunnelUp bool) error
 
 // Config configures the watch loop.
 type Config struct {
-	Iface        string
-	Target       string
+	Iface  string
+	Target string
+	// Table is the policy routing table whose contents should agree with the
+	// loop's belief about the tunnel.
+	Table        int
 	Interval     time.Duration
 	Timeout      time.Duration
 	FailAfter    int
@@ -44,6 +49,9 @@ type Config struct {
 }
 
 func (c *Config) withDefaults() {
+	if c.Table <= 0 {
+		c.Table = 100 // policy.DefaultTableID; not imported to keep this package standalone
+	}
 	if c.Interval <= 0 {
 		c.Interval = DefaultInterval
 	}
@@ -104,7 +112,11 @@ func (w *Watcher) Tick(ctx context.Context) {
 		w.consecutiveFail = 0
 		w.deadSince = time.Time{}
 		w.consecutiveOK++
-		if w.tunnelUp || w.consecutiveOK < w.cfg.RecoverAfter {
+		if w.tunnelUp {
+			w.repairDrift(ctx)
+			return
+		}
+		if w.consecutiveOK < w.cfg.RecoverAfter {
 			return
 		}
 		if !w.cooledDown() {
@@ -128,6 +140,30 @@ func (w *Watcher) Tick(ctx context.Context) {
 			w.transition(ctx, false)
 		}
 		w.maybeBounce()
+	}
+}
+
+// repairDrift re-applies when the kernel no longer agrees with the loop's
+// belief.
+//
+// Believing is not enough. The route can vanish underneath us: the transport
+// restarting takes its interface with it, and the kernel withdraws the device
+// route at the same time. The probe then starts succeeding again, the loop sees
+// no transition to act on, and table 100 stays empty forever -- traffic silently
+// on the uplink with everything reporting healthy. That is the same shape as the
+// outage this watchdog exists to prevent, so it checks the kernel rather than
+// trusting memory.
+func (w *Watcher) repairDrift(ctx context.Context) {
+	out, err := w.r.Run("ip", "-4", "route", "show", "table", strconv.Itoa(w.cfg.Table))
+	if err != nil {
+		return // Cannot tell; churning on an unreadable table helps nobody.
+	}
+	if strings.Contains(out, w.cfg.Iface) {
+		return
+	}
+	w.log.Printf("table %d lost the tunnel route while the tunnel is healthy; re-applying", w.cfg.Table)
+	if err := w.apply(ctx, true); err != nil {
+		w.log.Printf("re-apply after drift failed, will retry: %v", err)
 	}
 }
 
