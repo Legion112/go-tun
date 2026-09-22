@@ -120,6 +120,34 @@ WireGuard; the exit VPS already runs AmneziaWG alongside it. Note the operationa
 risk this implies for the existing tunnel: it works because it is established, so
 if it ever drops it may not come back.
 
+## DNS
+
+Routing alone is not enough. Resolving a foreign name without the tunnel does not
+just give a slower answer, it gives a *different* one: measured here,
+`www.google.com` resolves to a different front-end via a local resolver than
+through the tunnel, and a direct query to a foreign resolver comes back with an
+address *and* NXDOMAIN in the same reply. So `gotun-dns` splits DNS the same way
+`gotun` splits routing -- direct-class names to a local resolver, everything else
+resolved through the tunnel with `SO_MARK`.
+
+It listens on `127.0.0.2:53`, because dnsmasq owns `:53` here and also serves
+DHCP. Point dnsmasq at it:
+
+```sh
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server=127.0.0.2
+uci add_list dhcp.@dnsmasq[0].server=77.88.8.8   # fallback
+uci commit dhcp && /etc/init.d/dnsmasq reload
+```
+
+The fallback is deliberately a *local* resolver rather than a foreign one. If
+gotun-dns is down, a geo-localised answer still connects; an interfered one does
+not.
+
+Marked DNS is UDP, and it does traverse VLESS -- sing-box logs
+`outbound packet connection to 1.1.1.1:53` -- so the split survives the move to a
+proxy transport.
+
 ## Rollback
 
 One command, and it takes effect immediately:
