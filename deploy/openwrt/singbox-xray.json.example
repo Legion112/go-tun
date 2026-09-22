@@ -9,7 +9,7 @@
       "mtu": 1400,
       "auto_route": false,
       "strict_route": false,
-      "stack": "system"
+      "stack": "gvisor"
     }
   ],
   "outbounds": [

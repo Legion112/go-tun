@@ -63,6 +63,14 @@ scp deploy/openwrt/singbox.init root@router:/etc/init.d/singbox
 
 Fill in the client UUID, then `sing-box check -c /etc/gotun/singbox.json`.
 
+**The tun stack must be `gvisor`, not `system`.** This costs an afternoon to
+discover: with `"stack": "system"` the tun comes up, packets reach it, and
+sing-box logs *nothing at all* -- no inbound connection, no error. The system
+stack relies on the redirect rules `auto_route` installs, which we deliberately
+do not want, so without them it silently processes nothing. gvisor handles
+packets in userspace and needs no routing help, which is why the binary is built
+with `-tags with_gvisor`.
+
 **`auto_route` must stay `false`.** gotun owns table 100, and letting sing-box
 install routes of its own would hijack the main table — including sing-box's own
 connection out to the server, which is a loop that is tedious to debug. With it
