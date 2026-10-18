@@ -105,6 +105,27 @@ Enabling classification writes `net.ipv6.conf.all.forwarding=1`. Note the side e
 
 `-drop-ipv6` still works but is deprecated in favour of `-ipv6 off`, which leaves behind no `disable_ipv6` sysctls that `clear` cannot undo.
 
+## Exposing a host behind the gateway
+
+Classification is by destination, which is the wrong axis for a host that
+answers unsolicited connections. The destination of a reply is whichever peer
+connected; when that peer is non-direct the reply is marked and egresses the
+exit hop, reaching them from an address they never dialled.
+
+```
+gotun apply -direct-src 192.168.8.162
+```
+
+`-direct-src` returns before the mark for traffic from those sources, so their
+replies follow `main` out the uplink. It takes bare addresses as well as CIDRs,
+and a `/0` is rejected: it would return for every packet, leaving apply
+reporting success while classifying nothing.
+
+The host loses the tunnel for its own outbound traffic too. That is the trade,
+and for a server it is the desired half — it should be reachable at the address
+its clients dial. `-mark-iface` is not a substitute, since such a host usually
+shares one bridge with every ordinary client.
+
 ## Host isolation
 
 **Host network namespace is never modified** by labs or tests. Integration tests use disposable Docker **bridge** networks (`--internal`), never `--network=host`. Only the Docker API control plane runs on the host.

@@ -40,6 +40,7 @@ start_service() {
 		-tunnel-iface "$GOTUN_TUNNEL_IFACE" \
 		-lan "$GOTUN_LAN" \
 		-mark-iface "$GOTUN_MARK_IFACE" \
+		-direct-src "$GOTUN_DIRECT_SRC" \
 		-fail-mode "${GOTUN_FAIL_MODE:-open}" \
 		-ipv6 "${GOTUN_IPV6:-off}" \
 		-probe-target "${GOTUN_PROBE_TARGET:-1.1.1.1:443}" \

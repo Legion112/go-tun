@@ -148,6 +148,36 @@ Marked DNS is UDP, and it does traverse VLESS -- sing-box logs
 `outbound packet connection to 1.1.1.1:53` -- so the split survives the move to a
 proxy transport.
 
+## Exposing a host: a port forward is not enough
+
+A forwarded port gets packets *in*. Getting them back out needs
+`GOTUN_DIRECT_SRC`.
+
+Classification reads the destination, and the destination of a reply is whoever
+connected. For a player, a peer or a monitoring probe from outside Russia that
+address is non-direct, so the reply is marked and leaves through the exit hop.
+It arrives from the VPS, not from the address the peer dialled, and the
+connection never establishes. Nothing in the setup looks wrong: the forward is
+right, the server is listening, the inbound packet really does arrive, and
+tcpdump on the server shows it answering.
+
+Inbound is unaffected either way. The mark chain sits at mangle + 1, ahead of
+nat prerouting, so it still sees the router's own WAN address as the destination
+and the ingress guard returns before anything is marked. Only the reply needs
+help, and it needs it by source:
+
+```sh
+GOTUN_DIRECT_SRC=192.168.8.162
+```
+
+That host then keeps the uplink for everything it originates as well, which for
+a server is the point — it should be reachable, and listed in any public server
+browser, at the address players actually dial.
+
+`-mark-iface` cannot express this: such a host normally shares `br-lan` with
+every ordinary client, so scoping by ingress interface would exempt the whole
+LAN with it.
+
 ## Rollback
 
 One command, and it takes effect immediately:

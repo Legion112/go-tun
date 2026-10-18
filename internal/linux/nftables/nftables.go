@@ -58,6 +58,10 @@ type liveRule struct {
 	Mark    *uint32
 	// DAddrs are ip daddr match targets (addr or addr/len), normalized as strings.
 	DAddrs []string
+	// SAddrs are ip saddr match targets, same shape as DAddrs. Kept apart
+	// because a source bypass and a destination exclude are different rules
+	// that must not satisfy each other's comparison.
+	SAddrs []string
 	// IIfNames from meta iifname matches.
 	IIfNames []string
 	// SetNames referenced in daddr set lookups (@home_nets).
@@ -228,6 +232,17 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 		if !stringSetsEqual(daddrsForComment(rules, chain, RuleComment("exclude-endpoint", want.Family)), wantEP) {
 			return false
 		}
+		// Compared exactly, for the same reason only-marked-ingress is: a
+		// leftover bypass for a host that moved or was removed would pass a
+		// count-based check and keep exempting an address nobody asked for,
+		// while a missing one silently re-marks a server's replies.
+		wantSrc := map[string]struct{}{}
+		for _, pref := range want.ExcludeSrcPrefixes {
+			wantSrc[normalizeDAddr(pref.String())] = struct{}{}
+		}
+		if !stringSetsEqual(saddrsForComment(rules, chain, RuleComment("direct-src", want.Family)), wantSrc) {
+			return false
+		}
 		if want.DropNonDirect {
 			return countComments(rules, chain, RuleComment("drop-non-direct", want.Family)) >= 1
 		}
@@ -334,6 +349,19 @@ func countComments(rules []liveRule, chain, comment string) int {
 		}
 	}
 	return n
+}
+
+func saddrsForComment(rules []liveRule, chain, comment string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, r := range rules {
+		if r.Chain != chain || r.Comment != comment {
+			continue
+		}
+		for _, a := range r.SAddrs {
+			out[normalizeDAddr(a)] = struct{}{}
+		}
+	}
+	return out
 }
 
 func daddrsForComment(rules []liveRule, chain, comment string) map[string]struct{} {
@@ -524,6 +552,7 @@ func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
 		}
 		r.DAddrs = append(r.DAddrs, d)
 	}
+	r.SAddrs = findAddrsInExpr(rule.Expr, "saddr")
 	r.IIfNames = findIIfNamesInExpr(rule.Expr)
 	r.OIfNames = findOIfNamesInExpr(rule.Expr)
 	r.Masquerade = hasNATStmtInExpr(rule.Expr)
@@ -565,6 +594,14 @@ func findMarkInExpr(exprs []json.RawMessage) (uint32, bool) {
 }
 
 func findDAddrsInExpr(exprs []json.RawMessage) []string {
+	return findAddrsInExpr(exprs, "daddr")
+}
+
+// findAddrsInExpr collects the values an ip/ip6 payload field is compared
+// against. The field is a parameter so a source match reuses exactly the same
+// traversal -- including the nesting quirks the destination path already
+// handles -- rather than growing a parallel copy that drifts from it.
+func findAddrsInExpr(exprs []json.RawMessage, field string) []string {
 	var out []string
 	seen := map[string]struct{}{}
 	var walk func([]json.RawMessage)
@@ -575,7 +612,7 @@ func findDAddrsInExpr(exprs []json.RawMessage) []string {
 				continue
 			}
 			if mraw, ok := obj["match"]; ok {
-				if d, ok := daddrFromMatch(mraw); ok {
+				if d, ok := addrFromMatch(mraw, field); ok {
 					if _, dup := seen[d]; !dup {
 						seen[d] = struct{}{}
 						out = append(out, d)
@@ -594,7 +631,7 @@ func findDAddrsInExpr(exprs []json.RawMessage) []string {
 	return out
 }
 
-func daddrFromMatch(mraw json.RawMessage) (string, bool) {
+func addrFromMatch(mraw json.RawMessage, field string) (string, bool) {
 	var m struct {
 		Left  json.RawMessage `json:"left"`
 		Right json.RawMessage `json:"right"`
@@ -602,20 +639,20 @@ func daddrFromMatch(mraw json.RawMessage) (string, bool) {
 	if err := json.Unmarshal(mraw, &m); err != nil {
 		return "", false
 	}
-	if !isIPDAddrPayload(m.Left) {
+	if !isIPAddrPayload(m.Left, field) {
 		return "", false
 	}
 	return matchRightToString(m.Right)
 }
 
-func isIPDAddrPayload(left json.RawMessage) bool {
+func isIPAddrPayload(left json.RawMessage, field string) bool {
 	var payloadWrap struct {
 		Payload struct {
 			Protocol string `json:"protocol"`
 			Field    string `json:"field"`
 		} `json:"payload"`
 	}
-	if json.Unmarshal(left, &payloadWrap) == nil && isDAddrProto(payloadWrap.Payload.Protocol, payloadWrap.Payload.Field) {
+	if json.Unmarshal(left, &payloadWrap) == nil && isAddrProto(payloadWrap.Payload.Protocol, payloadWrap.Payload.Field, field) {
 		return true
 	}
 	// Some nft versions nest as {"payload":{...}} already unwrapped above;
@@ -624,18 +661,18 @@ func isIPDAddrPayload(left json.RawMessage) bool {
 		Protocol string `json:"protocol"`
 		Field    string `json:"field"`
 	}
-	return json.Unmarshal(left, &payload) == nil && isDAddrProto(payload.Protocol, payload.Field)
+	return json.Unmarshal(left, &payload) == nil && isAddrProto(payload.Protocol, payload.Field, field)
 }
 
-// isDAddrProto accepts both families.
+// isAddrProto accepts both families.
 //
 // Requiring protocol=="ip" made every ip6 daddr match invisible to the JSON
 // parser: the exclude lists for IPv6 came back empty, never matched the spec,
 // and the whole table was deleted and rebuilt on every apply. The text parser
 // has the opposite blind spot -- it cannot tell the two apart at all -- which
 // is why rule comments carry the family. See RuleComment.
-func isDAddrProto(protocol, field string) bool {
-	return (protocol == "ip" || protocol == "ip6") && field == "daddr"
+func isAddrProto(protocol, field, want string) bool {
+	return (protocol == "ip" || protocol == "ip6") && field == want
 }
 
 func matchRightToString(right json.RawMessage) (string, bool) {
@@ -884,6 +921,11 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 		case rule.DropIPv6:
 			lines = append(lines, `meta nfproto ipv6 drop comment "drop-ipv6"`)
 		case rule.Description == "mark-non-direct":
+			// Source bypasses go first: they are the cheapest match and they
+			// must win over everything below, including the direct-set lookup.
+			for _, p := range rule.ExcludeSrcPrefixes {
+				lines = append(lines, fmt.Sprintf(`%s saddr %s return comment %q`, l3, p.String(), cmt("direct-src")))
+			}
 			for _, p := range rule.ExcludePrefixes {
 				lines = append(lines, fmt.Sprintf(`%s daddr %s return comment %q`, l3, p.String(), cmt("exclude-lan")))
 			}

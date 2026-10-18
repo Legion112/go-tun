@@ -258,6 +258,25 @@ type Policy struct {
 	// the SNAT skip list, whereas this is purely "traffic that cannot sensibly
 	// leave via an exit hop": RFC1918, CGNAT, link-local, loopback, multicast.
 	NonRoutablePrefixes []netip.Prefix
+	// DirectSources are hosts whose own traffic must never be marked, matched on
+	// the packet's source rather than its destination.
+	//
+	// It exists for a host this gateway exposes to the internet. A port-forwarded
+	// server replies to whoever connected, and that peer is usually non-direct,
+	// so destination classification marks the reply and sends it out the exit
+	// hop. The peer then gets an answer from an address it never dialled and the
+	// connection never establishes -- while the port forward itself looks
+	// correct, which is what makes it hard to see.
+	//
+	// Scoped by source because the destination is not knowable: it is whichever
+	// address happens to connect. MarkIIfNames cannot express this either, since
+	// such a host normally shares one bridge with every ordinary client.
+	//
+	// The cost is deliberate and worth stating: traffic this host originates by
+	// itself also stops being tunnelled, so its egress identity is the uplink's.
+	// For a game server that is the point -- it should be reachable at the
+	// address players dial.
+	DirectSources []netip.Prefix
 	// IPv6 selects how IPv6 destinations are treated. The zero value,
 	// IPv6Auto, classifies them like IPv4 whenever that can work.
 	IPv6 IPv6Mode
@@ -404,6 +423,11 @@ type NftRuleSpec struct {
 	// in prerouting, or skipping SNAT in postrouting.
 	ExcludePrefixes []netip.Prefix
 	ExcludeAddrs    []netip.Addr
+	// ExcludeSrcPrefixes: if the SOURCE is in any of these prefixes, return
+	// before this rule's action. Distinct from ExcludePrefixes, which matches
+	// the destination; see Policy.DirectSources for why a source match is
+	// needed at all.
+	ExcludeSrcPrefixes []netip.Prefix
 	// DirectSet: if dst is in this set, do not mark (go direct).
 	DirectSet string
 	// Mark value to set when dst is not in DirectSet and not excluded.

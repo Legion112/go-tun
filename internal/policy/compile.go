@@ -48,6 +48,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	ex4, ex6 := SplitPrefixes(excludes)
 	lan4, lan6 := SplitPrefixes(p.LANs)
 	ep4, ep6 := SplitAddrs(p.TunnelEndpoints)
+	src4, src6 := SplitPrefixes(dedupePrefixes(p.DirectSources))
 
 	plan, warnings := planIPv6(p, len(dir6))
 
@@ -76,7 +77,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Hook:     "prerouting",
 			Priority: MarkChainPriority,
 			Policy:   "accept",
-			Rules:    markRules(p, plan, mark, ex4, ex6, ep4, ep6),
+			Rules:    markRules(p, plan, mark, ex4, ex6, ep4, ep6, src4, src6),
 		},
 	}
 
@@ -335,7 +336,7 @@ func planIPv6(p Policy, directCount int) (IPv6Plan, []string) {
 // and it is emitted once with FamilyAny: it matches on the input interface, has
 // no layer-3 dependency, and a second copy would just double it in the chain.
 func markRules(p Policy, plan IPv6Plan, mark uint32,
-	ex4, ex6 []netip.Prefix, ep4, ep6 []netip.Addr) []NftRuleSpec {
+	ex4, ex6 []netip.Prefix, ep4, ep6 []netip.Addr, src4, src6 []netip.Prefix) []NftRuleSpec {
 
 	var rules []NftRuleSpec
 	if p.DropIPv6 {
@@ -349,20 +350,22 @@ func markRules(p Policy, plan IPv6Plan, mark uint32,
 		})
 	}
 	rules = append(rules, NftRuleSpec{
-		Description:     "mark-non-direct",
-		Family:          FamilyV4,
-		ExcludePrefixes: ex4,
-		ExcludeAddrs:    ep4,
-		DirectSet:       RuNetsSetName,
-		Mark:            mark,
+		Description:        "mark-non-direct",
+		Family:             FamilyV4,
+		ExcludePrefixes:    ex4,
+		ExcludeAddrs:       ep4,
+		ExcludeSrcPrefixes: src4,
+		DirectSet:          RuNetsSetName,
+		Mark:               mark,
 	})
 	if plan.Classify {
 		v6 := NftRuleSpec{
-			Description:     "mark-non-direct",
-			Family:          FamilyV6,
-			ExcludePrefixes: ex6,
-			ExcludeAddrs:    ep6,
-			DirectSet:       RuNetsSetNameV6,
+			Description:        "mark-non-direct",
+			Family:             FamilyV6,
+			ExcludePrefixes:    ex6,
+			ExcludeAddrs:       ep6,
+			ExcludeSrcPrefixes: src6,
+			DirectSet:          RuNetsSetNameV6,
 		}
 		if plan.Mark {
 			v6.Mark = mark
@@ -488,6 +491,22 @@ func validate(p Policy) error {
 			// where it matches nothing: the kernel compares a v6 packet's
 			// destination and a v4 packet never presents one.
 			return fmt.Errorf("policy: 4-in-6 DirectPrefix %v; write it as plain IPv4", pref)
+		}
+	}
+	for _, pref := range p.DirectSources {
+		if !pref.IsValid() {
+			return fmt.Errorf("policy: invalid DirectSource %v", pref)
+		}
+		if pref.Addr().Is4In6() {
+			return fmt.Errorf("policy: 4-in-6 DirectSource %v; write it as plain IPv4", pref)
+		}
+		// A default-route source would return before the mark rule for every
+		// packet, so apply would report success while classifying nothing at
+		// all -- the same silent no-op shape the rest of this policy works to
+		// avoid.
+		if pref.Bits() == 0 {
+			return fmt.Errorf("policy: DirectSource %v covers every source, which would disable"+
+				" marking entirely; name the hosts to bypass", pref)
 		}
 	}
 	if p.DropIPv6 && p.IPv6 == IPv6On {
@@ -656,15 +675,20 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 				Family:          rule.Family,
 				ExcludePrefixes: slices.Clone(rule.ExcludePrefixes),
 				ExcludeAddrs:    slices.Clone(rule.ExcludeAddrs),
-				DirectSet:       rule.DirectSet,
-				Mark:            rule.Mark,
-				DropIPv6:        rule.DropIPv6,
-				DropNonDirect:   rule.DropNonDirect,
-				IIfName:         rule.IIfName,
-				DropDstSet:      rule.DropDstSet,
-				IIfNames:        slices.Clone(rule.IIfNames),
-				OIfNames:        slices.Clone(rule.OIfNames),
-				SNATMasquerade:  rule.SNATMasquerade,
+				// Every field of NftRuleSpec has to be listed here or a change
+				// to it compares equal and apply reports "0 changes" while the
+				// kernel keeps the old rule. TestSemanticEqual_EveryRuleField
+				// guards the next field added.
+				ExcludeSrcPrefixes: slices.Clone(rule.ExcludeSrcPrefixes),
+				DirectSet:          rule.DirectSet,
+				Mark:               rule.Mark,
+				DropIPv6:           rule.DropIPv6,
+				DropNonDirect:      rule.DropNonDirect,
+				IIfName:            rule.IIfName,
+				DropDstSet:         rule.DropDstSet,
+				IIfNames:           slices.Clone(rule.IIfNames),
+				OIfNames:           slices.Clone(rule.OIfNames),
+				SNATMasquerade:     rule.SNATMasquerade,
 			}
 			sort.Strings(rules[j].IIfNames)
 			sort.Strings(rules[j].OIfNames)
@@ -673,6 +697,9 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 			})
 			sort.Slice(rules[j].ExcludeAddrs, func(a, b int) bool {
 				return rules[j].ExcludeAddrs[a].String() < rules[j].ExcludeAddrs[b].String()
+			})
+			sort.Slice(rules[j].ExcludeSrcPrefixes, func(a, b int) bool {
+				return rules[j].ExcludeSrcPrefixes[a].String() < rules[j].ExcludeSrcPrefixes[b].String()
 			})
 		}
 		// Family is part of the key: mark-non-direct now exists once per family,

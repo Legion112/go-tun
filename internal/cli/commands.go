@@ -79,6 +79,10 @@ type ApplyOptions struct {
 	DropIPv6        bool
 	MarkIfaceCSV    string
 	NonRoutableCSV  string
+	// DirectSrcCSV lists hosts to bypass classification by source address.
+	// Accepts bare addresses as well as CIDRs, because the thing being named
+	// is a host, not a subnet.
+	DirectSrcCSV string
 	// TunnelIface overrides the routed interface name. Empty keeps the default.
 	TunnelIface string
 	// DryRun reads real state but prints every write instead of applying it.
@@ -98,6 +102,26 @@ func parsePrefixCSV(csv string) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
 		}
 		out = append(out, pref)
+	}
+	return out, nil
+}
+
+// parseHostCSV parses a comma-separated list of hosts, accepting both a bare
+// address and a CIDR. A bare address becomes a single-host prefix: operators
+// name a server by its address, and requiring "/32" on it is the kind of
+// friction that ends in the flag being left off.
+func parseHostCSV(csv string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range splitCSV(csv) {
+		if pref, err := netip.ParsePrefix(part); err == nil {
+			out = append(out, pref)
+			continue
+		}
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid host %q: not an address or CIDR", part)
+		}
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
 	return out, nil
 }
@@ -189,6 +213,14 @@ func Apply(o ApplyOptions) error {
 		IPv6Fallback:    o.IPv6Fallback,
 		DropIPv6:        o.DropIPv6,
 		MarkIIfNames:    splitCSV(o.MarkIfaceCSV),
+	}
+
+	if ds := strings.TrimSpace(o.DirectSrcCSV); ds != "" {
+		srcs, err := parseHostCSV(ds)
+		if err != nil {
+			return err
+		}
+		p.DirectSources = srcs
 	}
 
 	if o.TunnelIface != "" {

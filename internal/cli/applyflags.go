@@ -19,6 +19,7 @@ type applyFlags struct {
 	ipv6, ipv6Fallback, directSNAT6 *string
 	markIface, dryRun               *string
 	tunnelIface, nonRoutable        *string
+	directSrc                       *string
 }
 
 func registerApplyFlags(fs *flag.FlagSet) *applyFlags {
@@ -55,6 +56,10 @@ func registerApplyFlags(fs *flag.FlagSet) *applyFlags {
 		tunnelIface: fs.String("tunnel-iface", policy.DefaultTunnelIface,
 			"name of the tunnel interface to route through; must match the device that exists on the box"+
 				" (netifd names it after the UCI section, and UCI section names cannot contain hyphens)"),
+		directSrc: fs.String("direct-src", "",
+			"hosts whose own traffic is never marked, by source address (comma-separated IPs or CIDRs);"+
+				" needed for a port-forwarded server, whose replies would otherwise leave via the exit hop"+
+				" and reach the peer from an address it never dialled"),
 		nonRoutable: fs.String("non-routable", "",
 			"extra destinations never to mark (comma-separated CIDRs); defaults to private, CGNAT, link-local, loopback and multicast space"),
 	}
@@ -88,6 +93,7 @@ func (f *applyFlags) options() (ApplyOptions, error) {
 		DropIPv6:        truthy(*f.dropIPv6),
 		MarkIfaceCSV:    *f.markIface,
 		NonRoutableCSV:  *f.nonRoutable,
+		DirectSrcCSV:    *f.directSrc,
 		TunnelIface:     strings.TrimSpace(*f.tunnelIface),
 		DryRun:          truthy(*f.dryRun),
 	}, nil

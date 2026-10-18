@@ -248,6 +248,14 @@ func parseRuleText(chain, line string) liveRule {
 		case "daddr":
 			// "ip daddr X", "ip daddr != @set", "ip daddr { a, b }"
 			r.DAddrs = append(r.DAddrs, parseMatchValues(fields, i+1)...)
+		case "saddr":
+			// Only a payload match counts. "fib saddr type != local" in the
+			// SNAT rule also contains the word, and reading its operand would
+			// put the literal "type" in SAddrs -- enough to make a converged
+			// snat-direct rule compare as drift on every apply.
+			if i >= 1 && (fields[i-1] == "ip" || fields[i-1] == "ip6") {
+				r.SAddrs = append(r.SAddrs, parseMatchValues(fields, i+1)...)
+			}
 		case "iifname":
 			r.IIfNames = append(r.IIfNames, parseMatchValues(fields, i+1)...)
 		case "oifname":

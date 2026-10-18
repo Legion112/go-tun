@@ -25,6 +25,20 @@ GOTUN_LAN=192.168.8.0/24
 # split routing at all.
 GOTUN_MARK_IFACE=br-lan
 
+# Hosts whose own traffic is never classified, matched on source address.
+# Comma-separated, bare addresses allowed.
+#
+# This is what a port-forwarded server needs. Classification looks at the
+# destination, and the destination of a reply is whoever connected -- usually
+# non-direct -- so the reply leaves via the exit hop and reaches that peer from
+# an address it never dialled. The connection then never establishes while the
+# port forward itself looks perfectly correct.
+#
+# The trade is that such a host loses the tunnel for its own outbound traffic
+# too. For a game server that is the point: it should be reachable, and listed,
+# at the address players actually dial.
+GOTUN_DIRECT_SRC=
+
 # open: if the tunnel is unusable, marked traffic takes the uplink. Nothing
 # breaks, and nothing tells you either -- geo-blocked sites simply behave as if
 # you were back on the ISP, so check egress identity to detect it.

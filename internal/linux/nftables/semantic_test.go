@@ -435,11 +435,16 @@ func TestParseRuleJSON_SetReferenceIsNotADAddr(t *testing.T) {
 func TestIsIPDAddrPayload_AcceptsIP6(t *testing.T) {
 	for _, proto := range []string{"ip", "ip6"} {
 		raw := []byte(`{"payload":{"protocol":"` + proto + `","field":"daddr"}}`)
-		if !isIPDAddrPayload(raw) {
+		if !isIPAddrPayload(raw, "daddr") {
 			t.Fatalf("%s daddr payload must be recognised", proto)
 		}
 	}
-	if isIPDAddrPayload([]byte(`{"payload":{"protocol":"ip6","field":"saddr"}}`)) {
+	if isIPAddrPayload([]byte(`{"payload":{"protocol":"ip6","field":"saddr"}}`), "daddr") {
 		t.Fatal("a saddr match is not a destination match")
+	}
+	// The same traversal now serves the source bypass, so the field it is
+	// asked for has to be the field it checks.
+	if !isIPAddrPayload([]byte(`{"payload":{"protocol":"ip","field":"saddr"}}`), "saddr") {
+		t.Fatal("an ip saddr payload must be recognised when saddr is what was asked for")
 	}
 }
