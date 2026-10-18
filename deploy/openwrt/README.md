@@ -40,6 +40,52 @@ the ip rule and nft table are gone too (they are kernel state, not files), so
 traffic quietly reverts to going out the ISP for everything. Nothing breaks, which
 is exactly why it is easy to miss.
 
+## Transport: XRay (VLESS/Reality) via sing-box
+
+Plain WireGuard is unusable on this path (see the next section). XRay over **TCP
+443** is not, and is already proven working from other devices on the same line.
+
+XRay is a proxy, not a route-based tunnel, and gotun routes by interface. sing-box
+bridges the two in a single static binary: a `tun` inbound plus a `vless`/reality
+outbound. gotun then needs no changes at all -- `-tunnel-iface xray0` -- and the
+transport can be swapped later without touching gotun.
+
+```sh
+# 27 MB static binary; OpenWrt feeds carry no sing-box/xray package.
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+  go build -tags "with_gvisor,with_utls" -trimpath -ldflags "-s -w" \
+  -o sing-box github.com/sagernet/sing-box/cmd/sing-box
+
+scp sing-box root@router:/usr/bin/sing-box
+scp deploy/openwrt/singbox-xray.json.example root@router:/etc/gotun/singbox.json
+scp deploy/openwrt/singbox.init root@router:/etc/init.d/singbox
+```
+
+Fill in the client UUID, then `sing-box check -c /etc/gotun/singbox.json`.
+
+**The tun stack must be `gvisor`, not `system`.** This costs an afternoon to
+discover: with `"stack": "system"` the tun comes up, packets reach it, and
+sing-box logs *nothing at all* -- no inbound connection, no error. The system
+stack relies on the redirect rules `auto_route` installs, which we deliberately
+do not want, so without them it silently processes nothing. gvisor handles
+packets in userspace and needs no routing help, which is why the binary is built
+with `-tags with_gvisor`.
+
+**`auto_route` must stay `false`.** gotun owns table 100, and letting sing-box
+install routes of its own would hijack the main table — including sing-box's own
+connection out to the server, which is a loop that is tedious to debug. With it
+false the only route that appears is the kernel's on-link `/30` for the tun's own
+address; verify with `ip route show default | grep xray0`, which must print
+nothing.
+
+Because sing-box terminates TCP and opens its own connection outbound, the LAN
+client's source address never leaves the router, so the tun zone needs no
+masquerade — only `mtu_fix`, since the tun runs at MTU 1400 and this is TCP
+carried inside TCP.
+
+Verified on the target: the binary runs, `sing-box check` passes, the tun comes up
+and is removed cleanly on stop, and the main table is untouched.
+
 ## Known blocker: new WireGuard sessions do not survive on this path
 
 Not a router problem, and **not fixable by changing firmware**. A brand-new plain
@@ -73,6 +119,34 @@ The practical route forward is an obfuscated transport rather than plain
 WireGuard; the exit VPS already runs AmneziaWG alongside it. Note the operational
 risk this implies for the existing tunnel: it works because it is established, so
 if it ever drops it may not come back.
+
+## DNS
+
+Routing alone is not enough. Resolving a foreign name without the tunnel does not
+just give a slower answer, it gives a *different* one: measured here,
+`www.google.com` resolves to a different front-end via a local resolver than
+through the tunnel, and a direct query to a foreign resolver comes back with an
+address *and* NXDOMAIN in the same reply. So `gotun-dns` splits DNS the same way
+`gotun` splits routing -- direct-class names to a local resolver, everything else
+resolved through the tunnel with `SO_MARK`.
+
+It listens on `127.0.0.2:53`, because dnsmasq owns `:53` here and also serves
+DHCP. Point dnsmasq at it:
+
+```sh
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server=127.0.0.2
+uci add_list dhcp.@dnsmasq[0].server=77.88.8.8   # fallback
+uci commit dhcp && /etc/init.d/dnsmasq reload
+```
+
+The fallback is deliberately a *local* resolver rather than a foreign one. If
+gotun-dns is down, a geo-localised answer still connects; an interfered one does
+not.
+
+Marked DNS is UDP, and it does traverse VLESS -- sing-box logs
+`outbound packet connection to 1.1.1.1:53` -- so the split survives the move to a
+proxy transport.
 
 ## Rollback
 

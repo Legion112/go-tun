@@ -4,6 +4,7 @@ BIN_DNS := bin/gotun-dns
 BIN_CLIENT := bin/gotun-client
 CLIENT_ARM64 := bin/gotun-client-linux-arm64
 GOTUN_ARM64 := bin/gotun-linux-arm64
+DNS_ARM64 := bin/gotun-dns-linux-arm64
 MMDB := data/geo/GeoIP2-City.mmdb
 
 FUZZTIME ?= 30s
@@ -23,6 +24,7 @@ build:
 build-arm64:
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -o $(GOTUN_ARM64) ./cmd/gotun
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -o $(DNS_ARM64) ./cmd/gotun-dns
 
 # Suffixed output so an amd64 binary can never be scp'd to an arm64 client.
 build-client-arm64:

@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+#
+# sing-box provides the tunnel as a tun interface; gotun classifies and routes
+# into it with -tunnel-iface. Neither knows about the other, which is the point:
+# the transport can change without gotun changing.
+#
+# auto_route is deliberately false in the config. sing-box must not install
+# routes of its own -- gotun owns table 100, and letting sing-box touch the main
+# table would hijack the underlay, including sing-box's own connection out.
+
+START=98
+STOP=11
+
+USE_PROCD=1
+
+CONF=/etc/gotun/singbox.json
+
+start_service() {
+	[ -f "$CONF" ] || { echo "sing-box: $CONF missing" >&2; return 1; }
+	/usr/bin/sing-box check -c "$CONF" || { echo "sing-box: config rejected" >&2; return 1; }
+
+	procd_open_instance
+	procd_set_param command /usr/bin/sing-box run -c "$CONF"
+	# It is a long-running proxy, so it is supervised, unlike gotun's one-shot apply.
+	procd_set_param respawn 3600 5 0
+	procd_set_param stderr 1
+	procd_set_param file "$CONF"
+	procd_close_instance
+}

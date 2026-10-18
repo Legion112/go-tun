@@ -667,3 +667,32 @@ func TestCompile_MarkChainSitsPastMangle(t *testing.T) {
 	}
 	t.Fatal("no filter prerouting chain compiled")
 }
+
+// Fail-open withdraws the route but must leave the interface alone, or the
+// tunnel can never come back by itself.
+func TestCompile_FailOpenTunnelDownKeepsInterfaceUp(t *testing.T) {
+	p := testPolicy(false)
+	p.FailMode = policy.FailOpen
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.WireGuard.Up {
+		t.Fatal("fail-open must keep the interface up so handshakes continue")
+	}
+	if st.WireGuard.RouteAllowedIPs {
+		t.Fatal("a tunnel that is not carrying traffic must not keep its AllowedIPs routes")
+	}
+}
+
+func TestCompile_FailClosedTunnelDownStillDownsInterface(t *testing.T) {
+	p := testPolicy(false)
+	p.FailMode = policy.FailClosed
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.WireGuard.Up {
+		t.Fatal("fail-closed still downs the interface")
+	}
+}

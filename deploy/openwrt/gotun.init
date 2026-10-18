@@ -1,22 +1,26 @@
 #!/bin/sh /etc/rc.common
 #
-# gotun is a one-shot reconciler, not a daemon: it converges kernel state and
-# exits. So there is no process to supervise and USE_PROCD buys nothing -- this
-# is a boot-time apply plus a stop that tears the policy down.
+# gotun watch converges the policy once and then keeps table 100 honest about
+# whether the tunnel is actually carrying traffic.
 #
-# START is late on purpose. The apply installs a route through the tunnel device,
-# which netifd has to have created first. If it has not, the route step fails
-# while the nft table and the ip rule are already in place, which under the
-# default fail-open policy leaves table 100 empty and traffic on the uplink --
-# degraded, not broken. The hotplug hook then re-applies when the interface
-# actually comes up.
+# This is supervised, unlike the earlier one-shot apply. The one-shot could not
+# notice a tunnel that was up but dead, which is exactly how an outage went
+# unnoticed for its whole duration: the route stayed pointing into a tunnel that
+# swallowed every packet, and nothing was watching.
+#
+# START is late because the route needs the tunnel device to exist first. If it
+# does not yet, the apply still installs the classifier and leaves table 100
+# empty, which under fail-open means traffic uses the uplink -- degraded, not
+# broken -- until the transport comes up and the watchdog restores the route.
 
 START=99
 STOP=10
 
+USE_PROCD=1
+
 CONF=/etc/gotun/gotun.conf
 
-start() {
+start_service() {
 	if [ ! -f "$CONF" ]; then
 		echo "gotun: $CONF is missing; refusing to guess a policy" >&2
 		return 1
@@ -29,20 +33,27 @@ start() {
 		return 1
 	fi
 
-	/usr/bin/gotun apply \
+	procd_open_instance
+	procd_set_param command /usr/bin/gotun watch \
 		-prefixes "$GOTUN_PREFIXES" \
 		-endpoint "$GOTUN_ENDPOINT" \
 		-tunnel-iface "$GOTUN_TUNNEL_IFACE" \
 		-lan "$GOTUN_LAN" \
 		-mark-iface "$GOTUN_MARK_IFACE" \
-		-tunnel-up "${GOTUN_TUNNEL_UP:-true}" \
 		-fail-mode "${GOTUN_FAIL_MODE:-open}" \
-		-ipv6 "${GOTUN_IPV6:-auto}" \
-		-ipv6-fallback "${GOTUN_IPV6_FALLBACK:-direct}"
+		-ipv6 "${GOTUN_IPV6:-off}" \
+		-probe-target "${GOTUN_PROBE_TARGET:-1.1.1.1:443}" \
+		-probe-interval "${GOTUN_PROBE_INTERVAL:-60s}" \
+		-fail-after "${GOTUN_FAIL_AFTER:-3}" \
+		-recover-after "${GOTUN_RECOVER_AFTER:-2}"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stderr 1
+	procd_set_param file "$CONF"
+	procd_close_instance
 }
 
-stop() {
-	# Removes the ip rule first, so nothing is steered into a table that is
-	# being torn down.
+stop_service() {
+	# Removes the ip rule first, so nothing is steered into a table being torn
+	# down.
 	/usr/bin/gotun clear
 }

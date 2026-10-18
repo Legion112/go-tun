@@ -12,12 +12,13 @@ import (
 
 func wgSpec() policy.WireGuardSpec {
 	return policy.WireGuardSpec{
-		Interface:  "wg-exit",
-		PrivateKey: "PRIVKEY",
-		ListenPort: 51820,
-		Addresses:  []netip.Prefix{netip.MustParsePrefix("10.99.0.1/30")},
-		Managed:    true,
-		Up:         true,
+		Interface:       "wg-exit",
+		PrivateKey:      "PRIVKEY",
+		ListenPort:      51820,
+		Addresses:       []netip.Prefix{netip.MustParsePrefix("10.99.0.1/30")},
+		Managed:         true,
+		Up:              true,
+		RouteAllowedIPs: true,
 		Peer: policy.WireGuardPeer{
 			PublicKey:           "PEERPUB",
 			Endpoint:            "10.20.0.3:51820",
@@ -130,5 +131,62 @@ func TestReconcile_PrivateKeyIsPipedViaProcfs(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(r.Calls, "\n"), "PRIVKEY\t") {
 		t.Fatal("the key must not appear as a command argument")
+	}
+}
+
+// Under fail-open a dead tunnel must keep its interface up. A WireGuard
+// interface that is down sends no handshakes at all, so downing it here would
+// make the tunnel permanently dead the moment the watchdog declared it dead
+// once -- the opposite of recovery.
+func TestReconcile_NotCarryingTrafficButUpKeepsTheLinkUp(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip link show dev wg-exit"] = "2: wg-exit: <POINTOPOINT,UP,LOWER_UP>"
+	spec := wgSpec()
+	spec.Up = true
+	spec.RouteAllowedIPs = false
+
+	if _, err := wireguard.Reconcile(r, spec); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.Calls, "\n")
+	if strings.Contains(joined, "ip link set dev wg-exit down") {
+		t.Fatalf("the link must stay up so the tunnel can re-establish:\n%s", joined)
+	}
+}
+
+// The other half: the routes must still go, or traffic inside AllowedIPs keeps
+// being sent into a tunnel that is not working instead of out the uplink.
+func TestReconcile_NotCarryingTrafficWithdrawsAllowedIPRoutes(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip link show dev wg-exit"] = "2: wg-exit: <POINTOPOINT,UP,LOWER_UP>"
+	spec := wgSpec()
+	spec.Up = true
+	spec.RouteAllowedIPs = false
+
+	if _, err := wireguard.Reconcile(r, spec); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(r.Calls, "\n")
+	if !strings.Contains(joined, "route del 10.30.0.0/24 dev wg-exit") {
+		t.Fatalf("AllowedIPs routes must be withdrawn:\n%s", joined)
+	}
+	if strings.Contains(joined, "route replace 10.30.0.0/24 dev wg-exit") {
+		t.Fatalf("withdrawn routes must not be reinstalled in the same pass:\n%s", joined)
+	}
+}
+
+// Fail-closed is unchanged: it still downs the link.
+func TestReconcile_FailClosedStillDownsTheLink(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Outputs["ip link show dev wg-exit"] = "2: wg-exit: <POINTOPOINT,UP,LOWER_UP>"
+	spec := wgSpec()
+	spec.Up = false
+	spec.RouteAllowedIPs = false
+
+	if _, err := wireguard.Reconcile(r, spec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(r.Calls, "\n"), "ip link set dev wg-exit down") {
+		t.Fatalf("fail-closed must still down the link:\n%v", r.Calls)
 	}
 }
