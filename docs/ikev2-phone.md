@@ -404,6 +404,51 @@ packets in a lab, so it is pinned as configuration: no `AlwaysOn`, the catch-all
 `TestGeneratedFilesCarryNoCredential` -- neither generated file carrying a
 secret.
 
+## Deployed, and what the live router answered
+
+Running on flint2 since 2026-10-19, with a phone connecting over LTE. Several
+things the lab could not reach are now measured.
+
+**iOS accepted all 52 traffic selectors** in one `local_ts`, and installed them.
+That was the open question the whole prefixes-not-ranges decision rested on, and
+the limit is undocumented. Answered.
+
+**iOS accepted the self-signed gateway certificate** from the CA payload the
+profile carries. That payload did not exist before the deploy: the first profile
+had no way to establish trust at all, and the symptom would have been a generic
+connect error saying nothing about certificates. `-ca` now embeds it.
+
+**The upstream NAT has no hairpin.** From inside the house the public address
+times out, so a phone at home cannot dial it. The `-home-ssid` rule was written
+on the theory that a hairpinned tunnel is a bad idea; it turns out to be the
+only thing that works. At home the split comes from the classifier anyway,
+since the phone sits behind a bridge that is already in `-mark-iface`.
+
+**The split works on both classes.** Over one session from LTE, counted by
+egress interface for the client's virtual IP: **90 MB direct** out the uplink
+and **10 MB through the tunnel**, with nothing at all to the home LAN.
+
+**Leaving a network, iOS sends no DELETE.** It simply stops. The stale SA
+lingered until the next connect arrived with `INITIAL_CONTACT`. From the
+gateway a departed client and a present one look identical, which is exactly
+why `user revoke` terminates rather than trusting the session to be gone.
+
+**iOS negotiated `AES_CBC-256/HMAC_SHA2_256/MODP_2048`**, not the GCM/ECP
+entries offered first. It works; MODP-2048 is a slow DH on a router CPU, and
+narrowing the gateway proposals or pinning the profile's crypto is open.
+
+**The phone does not use the pushed resolver.** charon sends it --
+`CPRP(ADDR DNS)` is in the log -- and the count of DNS packets arriving at it is
+zero. iOS is resolving over encrypted DNS of its own. That traffic goes through
+the tunnel, so nothing leaks, but `.ru` names miss the GeoDNS treatment
+`gotun-dns` exists for. Unsolved, and not obviously solvable from the gateway
+short of blocking DoH, which is a bigger decision than it sounds.
+
+**The health endpoint could not bind `0.0.0.0:8443`** because uhttpd owns
+`127.0.0.1:8443` there. It logged the failure and the watchdog carried on, which
+is the behaviour that was designed for exactly this and the first time it
+mattered. Bound to the WAN address instead.
+
 ## What the lab still cannot prove
 
 A strongSwan client is not an iOS client. Out of reach here, and therefore

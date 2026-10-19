@@ -239,6 +239,17 @@ gotun ikev2 -server vpn.example.net \
 It writes a swanctl configuration and a `.mobileconfig`, from one description so
 the two cannot disagree about the gateway's identity or the resolver it pushes.
 
+**`-ca <file>` is required unless the gateway certificate is publicly trusted.**
+The CA goes into the profile as a root payload, and a root delivered inside the
+same profile is trusted for it — no separate install, no toggle in Certificate
+Trust Settings. Without it the phone has nothing to validate the server against
+and fails with a generic connect error that says nothing about trust.
+
+**`-on-demand false`** ships a profile connected by hand. That is what a first
+test against a gateway which is not reachable from everywhere wants: on-demand
+with no probe makes the phone try on every network and hold traffic wherever it
+cannot reach the gateway.
+
 Three things are worth knowing before reading the output.
 
 **The phone's routing table is the gateway's decision.** Apple's IKEv2 payload
