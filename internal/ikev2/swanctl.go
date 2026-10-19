@@ -6,36 +6,25 @@ import (
 	"strings"
 )
 
-// connParams is what differs between the two shapes of generated gateway
-// configuration.
+// renderConnection emits the one road-warrior connection.
 //
-// The shared-connection shape accepts any identity that has a secret; the
-// per-user shape pins one identity to one connection, which is what makes a
-// fixed virtual IP possible at all -- strongSwan's pools are per-connection
-// and not identity-aware, so one connection with several pools hands out
-// whichever address is free rather than the user's own.
-type connParams struct {
-	Name     string // connection and child section name
-	Pool     string // pool section name
-	RemoteID string // identity to expect; "%any" accepts anyone with a secret
-}
-
-// renderConnection emits one connection block.
-//
-// Shared by both shapes on purpose: the traffic selectors are the single
-// decision this package exists to make, and two renderers would eventually
-// disagree about them while every test still passed.
+// One connection for everybody, accepting any identity that has a secret. A
+// connection per user would be needed only to pin each person a fixed address,
+// and that is not needed to tell them apart: charon prints the EAP identity of
+// every SA next to the address it handed out, so `--list-sas` answers "who is
+// this" and `--terminate --ike-id` ends exactly one person's session. The
+// per-user form also duplicated the whole 52-entry selector list per user.
 //
 // Every key sits on its own line, which is not style. A strongswan.conf value
 // extends to the end of its line, so `local-1 { auth = pubkey  id = x }`
 // parses auth as "pubkey  id = x }" and the connection is discarded with
 // "invalid value for: auth" -- an error that reads like an unsupported auth
 // method rather than a syntax mistake.
-func renderConnection(c Config, p connParams, ts []string) string {
+func renderConnection(c Config, ts []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "connections {\n  %s {\n", p.Name)
+	b.WriteString("connections {\n  phone {\n")
 	b.WriteString("    version = 2\n")
-	fmt.Fprintf(&b, "    pools = %s\n", p.Pool)
+	b.WriteString("    pools = phone-pool\n")
 	// encap forces UDP 4500 rather than leaving it to NAT detection. The real
 	// path crosses two NATs, so production is always encapsulated; a gateway
 	// that negotiated raw ESP when it happened to see no NAT would be a
@@ -55,15 +44,17 @@ func renderConnection(c Config, p connParams, ts []string) string {
 	b.WriteString("    }\n")
 	// EAP-MSCHAPv2 rather than a PSK: iOS stores the password in the keychain
 	// after the first connect, so On-Demand needs no prompt, and there is no
-	// shared secret to end up in a generated profile. eap_id defaults to id,
-	// so naming the identity once pins both the IKE identity the phone sends
-	// and the EAP identity it authenticates with.
+	// shared secret to end up in a generated profile.
+	//
+	// eap_id = %any accepts whichever identity has a secret, which is what
+	// makes `gotun ikev2 user add` able to issue and withdraw people without
+	// touching this connection at all.
 	b.WriteString("    remote-1 {\n")
 	b.WriteString("      auth = eap-mschapv2\n")
-	fmt.Fprintf(&b, "      id = %s\n", p.RemoteID)
+	b.WriteString("      eap_id = %any\n")
 	b.WriteString("    }\n")
 	b.WriteString("    children {\n")
-	fmt.Fprintf(&b, "      %s {\n", p.Name)
+	b.WriteString("      phone {\n")
 	// if_id is what makes this route-based. Without it charon installs XFRM
 	// policies and no interface, decrypted packets surface on the physical WAN
 	// device, and gotun's inbound model -- -mark-iface and the home_nets
@@ -93,14 +84,12 @@ func renderPool(c Config, name, addrs string) string {
 	return b.String()
 }
 
-// RenderSwanctl emits the single-user gateway half: one road-warrior connection
-// accepting any identity that has a secret, the virtual-IP pool, and the
-// narrowed traffic selectors.
+// RenderSwanctl emits the gateway half: one road-warrior connection, the
+// virtual-IP pool, and the narrowed traffic selectors.
 //
-// For more than one person prefer `gotun ikev2 user add`, which writes a
-// connection per user and so can pin each one a fixed address and revoke them
-// individually. The two shapes must not share a conf.d directory: they would
-// both match, and which connection charon selected would be an accident.
+// Credentials are not here. `gotun ikev2 user add` writes one file per person
+// into the same conf.d directory, each carrying nothing but a secret, so
+// issuing and withdrawing people never touches this file.
 func RenderSwanctl(c Config) (string, error) {
 	if err := c.Validate(); err != nil {
 		return "", err
@@ -109,25 +98,20 @@ func RenderSwanctl(c Config) (string, error) {
 
 	ts := SelectorStrings(c)
 	var b strings.Builder
-	fmt.Fprintf(&b, `%s
-# Single-user shape: one connection accepting any identity that has a secret.
-# For several people use "gotun ikev2 user add", which gives each one its own
-# connection, a fixed virtual IP and a credential you can revoke on its own.
-
-`, selectorPreamble(len(ts)))
-	b.WriteString(renderConnection(c, connParams{
-		Name:     "phone",
-		Pool:     "phone-pool",
-		RemoteID: "%any",
-	}, ts))
+	fmt.Fprintf(&b, "%s\n\n", selectorPreamble(len(ts)))
+	b.WriteString(renderConnection(c, ts))
 	b.WriteString(renderPool(c, "phone-pool", c.Pool.String()))
 
 	// Deliberately not generated here: a credential in a file this tool writes
-	// is a credential in the operator's shell history, their editor's swap file
-	// and their backups. `user add` does write one, into a 0600 file that is
-	// nothing but the credential, and prints the secret once.
-	fmt.Fprintf(&b, `# Add the EAP credential by hand, in /etc/swanctl/swanctl.conf or a file
-# beside it. It is not generated:
+	// alongside a configuration is a credential in the operator's editor and
+	// their backups. `user add` writes one, into a 0600 file that is nothing
+	// but the credential, and prints the secret once.
+	fmt.Fprintf(&b, `# No credential here. Add people with:
+#
+#   gotun ikev2 user add <name>
+#
+# which writes a 0600 snippet beside this file and prints the password once.
+# For a single user with no credential management, by hand:
 #
 # secrets {
 #   eap-%s {
@@ -137,69 +121,6 @@ func RenderSwanctl(c Config) (string, error) {
 # }
 `, c.ClientID, c.ClientID)
 
-	return b.String(), nil
-}
-
-// RenderUser emits one user's whole gateway half: their connection, their
-// single-address pool, and their secret.
-//
-// All three in one file so that revocation is a delete rather than an edit --
-// nothing has to parse and rewrite a configuration that is currently
-// authenticating other people.
-func RenderUser(c Config, u User, secret string) (string, error) {
-	if err := ValidateUserName(u.Name); err != nil {
-		return "", err
-	}
-	if err := c.Validate(); err != nil {
-		return "", err
-	}
-	c.withDefaults()
-	if !u.VIP.IsValid() {
-		return "", fmt.Errorf("ikev2: user %q has no virtual IP", u.Name)
-	}
-	if !c.Pool.Contains(u.VIP) {
-		return "", fmt.Errorf("ikev2: user %q's address %v is outside the pool %v",
-			u.Name, u.VIP, c.Pool)
-	}
-	if secret == "" {
-		return "", fmt.Errorf("ikev2: user %q has no secret", u.Name)
-	}
-
-	ts := SelectorStrings(c)
-	pool := "pool-" + u.Name
-
-	var b strings.Builder
-	// The header is what List reads back. Deriving the name and address from
-	// the body instead would mean parsing swanctl.conf syntax to answer "who
-	// exists", and getting that wrong hands a second user an address already
-	// in use.
-	fmt.Fprintf(&b, "%s%s\n%s%s\n%s%s\n",
-		hdrName, u.Name, hdrVIP, u.VIP, hdrCreated, u.Created.UTC().Format(timeLayout))
-	fmt.Fprintf(&b, `#
-# Generated by gotun ikev2 user add. THIS FILE IS A CREDENTIAL: mode 0600, and
-# it does not belong in a repository or a backup that others can read.
-#
-# Revoking %s means deleting this file AND reloading AND terminating the live
-# session. The first two alone do not revoke anything: the connection does not
-# reauthenticate, so an established session rekeys without consulting the
-# secret and survives indefinitely. Measured; see docs/ikev2-phone.md.
-#
-#   gotun ikev2 user revoke %s
-#
-%s
-
-`, u.Name, u.Name, selectorPreamble(len(ts)))
-
-	b.WriteString(renderConnection(c, connParams{
-		Name:     u.Name,
-		Pool:     pool,
-		RemoteID: u.Name,
-	}, ts))
-	// A single-address pool is what pins the address to this user, and the
-	// connection being per-user is what makes the pool reachable only by them.
-	b.WriteString(renderPool(c, pool, u.VIP.String()+"/32"))
-	fmt.Fprintf(&b, "secrets {\n  eap-%s {\n    id = %s\n    secret = \"%s\"\n  }\n}\n",
-		u.Name, u.Name, secret)
 	return b.String(), nil
 }
 

@@ -13,17 +13,18 @@ import (
 	"github.com/legion/go-tun/test/integration/harness"
 )
 
-// TestIKEv2Users_NamedCredentialsAreFixedAndRevocable is the credential half of
-// the IKEv2 transport: one named password per person, a fixed address each, and
-// a revocation that actually revokes.
+// TestIKEv2Users_NamedCredentialsAreRevocable is the credential half of the
+// IKEv2 transport: one named password per person, and a revocation that
+// actually revokes.
 //
-// The last part is why this is an integration test rather than a unit one.
-// Revoking is two steps -- stop accepting the credential, and tear down the
-// session already using it -- and only a running daemon can show that the first
-// step alone leaves the tunnel up. The generated connection does not
-// reauthenticate, so an established IKE_SA rekeys without ever consulting the
-// secret again.
-func TestIKEv2Users_NamedCredentialsAreFixedAndRevocable(t *testing.T) {
+// It is an integration test rather than a unit one for two reasons, both of
+// which need a running daemon. Telling people apart is charon's job, not
+// gotun's -- it reports the EAP identity of every SA next to the address it
+// handed out, which is why nothing has to be pinned per user. And revoking is
+// two steps: only a daemon can show that stopping the credential leaves an
+// established tunnel up, because the connection does not reauthenticate and so
+// rekeys without ever consulting the secret again.
+func TestIKEv2Users_NamedCredentialsAreRevocable(t *testing.T) {
 	requireDocker(t)
 	ctx := context.Background()
 
@@ -72,22 +73,35 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
       --dn "CN=vpn.lab" --san vpn.lab --flag serverAuth --outform pem > /etc/swanctl/x509/gotun-gw.pem
 `))
 
-	// Users are added before charon starts, which is also the realistic order:
-	// the snippets land in conf.d and the daemon picks them up on load.
+	// The shared half: one connection, one pool, the selectors. No credential.
+	sharedFlags := []string{
+		"-server", "vpn.lab",
+		"-gateway-id", "vpn.lab",
+		"-vip-subnet", ikev2VIPSubnet,
+		"-vip-gateway", ikev2GatewayVIP,
+		"-pool", ikev2PoolAddrs,
+		"-probe-url", "http://vpn.lab:8443/alive",
+		"-if-id", ikev2IfID,
+	}
+	base := append([]string{"gotun", "ikev2"}, sharedFlags...)
+	if out, err := lab.Exec(ctx, "flint", append(base,
+		"-out-swanctl", "/etc/swanctl/conf.d/gotun-ikev2.conf",
+		"-out-profile", "/tmp/base.mobileconfig")...); err != nil {
+		t.Fatalf("gotun ikev2: %v\n%s", err, out)
+	}
+
+	// Then the people. Users are added before charon starts, which is also the
+	// realistic order: the snippets land in conf.d and the daemon picks them up
+	// on load.
 	secrets := map[string]string{}
 	for _, name := range []string{"alice", "bob"} {
-		out, err := lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "add", name,
-			"-server", "vpn.lab",
-			"-gateway-id", "vpn.lab",
-			"-vip-subnet", ikev2VIPSubnet,
-			"-vip-gateway", ikev2GatewayVIP,
-			"-pool", ikev2PoolAddrs,
-			"-probe-url", "http://vpn.lab:8443/alive",
-			"-if-id", ikev2IfID,
+		// The subcommand comes before the flags, which is what gotun ikev2
+		// now refuses to let you get wrong silently.
+		args := append([]string{"gotun", "ikev2", "user", "add", name}, sharedFlags...)
+		out, err := lab.Exec(ctx, "flint", append(args,
 			"-dir", "/etc/swanctl/conf.d",
 			"-out-profile", "/tmp/"+name+".mobileconfig",
-			"-apply", "false",
-		)
+			"-apply", "false")...)
 		if err != nil {
 			t.Fatalf("user add %s: %v\n%s", name, err, out)
 		}
@@ -95,7 +109,9 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
 	}
 
 	// The password must not be anywhere a person could re-read it later, and
-	// above all not in the file that gets copied to their phone.
+	// above all not in the file that gets copied to their phone. The per-user
+	// file must be a credential and nothing else: a connection duplicated per
+	// person would also duplicate the selector list, and two copies drift.
 	for name, secret := range secrets {
 		prof, err := lab.Exec(ctx, "flint", "cat", "/tmp/"+name+".mobileconfig")
 		if err != nil {
@@ -103,6 +119,17 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
 		}
 		if strings.Contains(prof, secret) {
 			t.Errorf("%s's password is in their .mobileconfig", name)
+		}
+		snippet, err := lab.Exec(ctx, "flint", "cat",
+			"/etc/swanctl/conf.d/gotun-user-"+name+".conf")
+		if err != nil {
+			t.Fatalf("read %s's snippet: %v", name, err)
+		}
+		for _, unwanted := range []string{"connections {", "local_ts"} {
+			if strings.Contains(snippet, unwanted) {
+				t.Errorf("%s's credential file contains %q, which is shared configuration",
+					name, unwanted)
+			}
 		}
 		mode, err := lab.Exec(ctx, "flint", "stat", "-c", "%a",
 			"/etc/swanctl/conf.d/gotun-user-"+name+".conf")
@@ -126,43 +153,58 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
 
 	// --- assertions ---
 
-	// 1: both are connected at the same time, each with the address their file
-	// pins. Read at the destination rather than from the client, so it is the
-	// address traffic actually arrives from.
-	want := map[string]string{"alice": "10.231.17.17", "bob": "10.231.17.18"}
+	// 1: both are connected at the same time, through one shared connection.
 	for _, name := range []string{"alice", "bob"} {
 		waitIKESA(t, lab, name, 30*time.Second)
-		got := mustGet(t, lab, name, "http://"+ikev2GatewayVIP+":8080/peer")
-		if got != want[name] {
-			t.Errorf("%s arrives from %q, want %q", name, got, want[name])
+		if !reachable(t, lab, name, "http://"+ikev2GatewayVIP+":8080/id") {
+			t.Fatalf("%s's tunnel does not carry traffic", name)
 		}
 	}
 
-	// 2: the gateway can say who is who. Attribution is the reason the
-	// addresses are fixed at all, and it comes from the connection being named
-	// after the user.
-	sas, err := lab.Exec(ctx, "flint", "swanctl", "--list-sas")
+	// 2: the gateway can say who is who, and from which address, without any
+	// per-user configuration. This is the answer to "do we need a fixed address
+	// to attribute a session": no -- charon records the identity and the
+	// address it handed out, together.
+	raw, err := lab.Exec(ctx, "flint", "swanctl", "--list-sas", "--raw")
 	if err != nil {
-		t.Fatalf("list-sas: %v", err)
+		t.Fatalf("list-sas --raw: %v", err)
+	}
+	ids := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		m := regexp.MustCompile(`remote-id=([a-z]+).*remote-vips=\[([^\]]*)\]`).FindStringSubmatch(line)
+		if m != nil {
+			ids[m[1]] = m[2]
+		}
 	}
 	for _, name := range []string{"alice", "bob"} {
-		if !strings.Contains(sas, name+":") {
-			t.Errorf("the gateway does not name %s's SA:\n%s", name, sas)
+		if ids[name] == "" {
+			t.Errorf("the gateway does not report %s's identity and address:\n%s", name, raw)
 		}
 	}
+	if ids["alice"] == ids["bob"] && ids["alice"] != "" {
+		t.Errorf("both users were handed the same address %q", ids["alice"])
+	}
 
-	// 3: the address survives a reconnect. A sticky lease would pass the first
-	// assertion and fail this one.
-	must(t, lab.ExecOK(ctx, "alice", "swanctl", "--terminate", "--ike", "home"))
-	time.Sleep(time.Second)
-	must(t, lab.ExecOK(ctx, "alice", "swanctl", "--initiate", "--child", "home"))
-	waitIKESA(t, lab, "alice", 30*time.Second)
-	if got := mustGet(t, lab, "alice", "http://"+ikev2GatewayVIP+":8080/peer"); got != want["alice"] {
-		t.Errorf("after reconnecting alice arrives from %q, want %q", got, want["alice"])
+	// 3: and gotun surfaces it, so the operator does not have to read raw vici
+	// output to find out who is on the tunnel.
+	list, err := lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "list",
+		"-dir", "/etc/swanctl/conf.d")
+	if err != nil {
+		t.Fatalf("user list: %v", err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		if !strings.Contains(list, name) {
+			t.Errorf("%s is missing from the listing:\n%s", name, list)
+		}
+	}
+	for _, name := range []string{"alice", "bob"} {
+		if !strings.Contains(list, ids[name]) {
+			t.Errorf("the listing does not show %s's live address %s:\n%s", name, ids[name], list)
+		}
 	}
 
 	// 4: a password is bound to its identity. Without this, one leaked
-	// credential would be usable as anyone, and per-user revocation would mean
+	// credential would be usable as anyone and per-user revocation would mean
 	// nothing.
 	writeEAPClient(t, lab, "bob", "alice", secrets["bob"], caPEM)
 	must(t, lab.ExecOK(ctx, "bob", "swanctl", "--terminate", "--ike", "home"))
@@ -171,15 +213,15 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
 	if reachable(t, lab, "bob", "http://"+ikev2GatewayVIP+":8080/id") {
 		t.Error("bob's password authenticated him as alice")
 	}
-	// Put bob back as himself.
 	writeEAPClient(t, lab, "bob", "bob", secrets["bob"], caPEM)
 	must(t, lab.ExecOK(ctx, "bob", "swanctl", "--load-all"))
 	must(t, lab.ExecOK(ctx, "bob", "swanctl", "--initiate", "--child", "home"))
 	waitIKESA(t, lab, "bob", 30*time.Second)
 
-	// 5: the finding this whole procedure is shaped around. Removing the
-	// credential and reloading stops NEW sessions; the one alice already has
-	// keeps working, because the connection does not reauthenticate.
+	// 5: the finding the revoke path is shaped around. Removing the credential
+	// and reloading stops NEW sessions; the one alice already has keeps
+	// working, because the connection does not reauthenticate.
+	//
 	// Through a shell with stderr folded in: the warning is deliberately on
 	// stderr, and harness.Exec returns only stdout on success.
 	out, err := lab.Exec(ctx, "flint", "bash", "-c",
@@ -197,61 +239,55 @@ pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
 			" and gotun ikev2 user revoke should both be revisited")
 	}
 
-	// 6: ...and the second step is what actually ends it.
-	if _, err := lab.Exec(ctx, "flint", "swanctl", "--terminate", "--ike", "alice"); err != nil {
-		t.Fatalf("terminate alice: %v", err)
+	// 6: ...and terminating by her identity is what ends it. This is the
+	// mechanism gotun ikev2 user revoke uses: find the SA whose remote-id is
+	// the user, terminate that unique id.
+	aliceID := ""
+	raw, err = lab.Exec(ctx, "flint", "swanctl", "--list-sas", "--raw")
+	if err != nil {
+		t.Fatalf("list-sas --raw: %v", err)
 	}
+	for _, line := range strings.Split(raw, "\n") {
+		if !strings.Contains(line, "remote-id=alice") {
+			continue
+		}
+		if m := regexp.MustCompile(`uniqueid=([0-9]+)`).FindStringSubmatch(line); m != nil {
+			aliceID = m[1]
+		}
+	}
+	if aliceID == "" {
+		t.Fatalf("could not find alice's session by identity:\n%s", raw)
+	}
+	must(t, lab.ExecOK(ctx, "flint", "swanctl", "--terminate", "--ike-id", aliceID))
 	if reachable(t, lab, "alice", "http://"+ikev2GatewayVIP+":8080/id") {
 		t.Error("alice's session survived the terminate")
 	}
-	// And she cannot come back.
 	_ = lab.ExecOK(ctx, "alice", "swanctl", "--initiate", "--child", "home")
 	if reachable(t, lab, "alice", "http://"+ikev2GatewayVIP+":8080/id") {
 		t.Error("a revoked user reconnected")
 	}
 
-	// 7: revocation is per user. bob was never touched and must be unaffected
-	// throughout -- a revocation that takes everyone down with it is not one
+	// 7: revocation is per person. bob was never touched and must be
+	// unaffected -- a revocation that takes everyone down with it is not one
 	// you would dare use.
 	if !reachable(t, lab, "bob", "http://"+ikev2GatewayVIP+":8080/id") {
 		t.Error("revoking alice disturbed bob")
 	}
-	if got := mustGet(t, lab, "bob", "http://"+ikev2GatewayVIP+":8080/peer"); got != want["bob"] {
-		t.Errorf("bob's address moved to %q after alice was revoked", got)
-	}
-
-	// 8: the revoked name holds its address, so the next person cannot inherit
-	// alice's history.
-	list, err := lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "list", "-dir", "/etc/swanctl/conf.d")
-	if err != nil {
+	if list, err := lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "list",
+		"-dir", "/etc/swanctl/conf.d"); err != nil {
 		t.Fatalf("user list: %v", err)
-	}
-	if !strings.Contains(list, "bob") || !strings.Contains(list, "active") {
-		t.Errorf("bob should still be listed as active:\n%s", list)
-	}
-	if !strings.Contains(list, "revoked") || !strings.Contains(list, want["alice"]) {
-		t.Errorf("alice should be listed as revoked, still holding %s:\n%s", want["alice"], list)
-	}
-	add, err := lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "add", "carol",
-		"-server", "vpn.lab", "-gateway-id", "vpn.lab",
-		"-vip-subnet", ikev2VIPSubnet, "-vip-gateway", ikev2GatewayVIP, "-pool", ikev2PoolAddrs,
-		"-probe-url", "http://vpn.lab:8443/alive", "-if-id", ikev2IfID,
-		"-dir", "/etc/swanctl/conf.d", "-out-profile", "/tmp/carol.mobileconfig", "-apply", "false")
-	if err != nil {
-		t.Fatalf("user add carol: %v\n%s", err, add)
-	}
-	if strings.Contains(add, want["alice"]) {
-		t.Errorf("carol was handed alice's revoked address:\n%s", add)
+	} else if strings.Contains(list, "alice") {
+		t.Errorf("alice is still listed after revocation:\n%s", list)
 	}
 
-	// 9: the applied path ends a session without a separate command, which is
-	// the form an operator will actually use under pressure.
+	// 8: and the applied form does both steps in one command, which is the form
+	// an operator will actually use under pressure.
 	out, err = lab.Exec(ctx, "flint", "gotun", "ikev2", "user", "revoke", "bob",
 		"-dir", "/etc/swanctl/conf.d")
 	if err != nil {
 		t.Fatalf("revoke bob: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "terminated bob's live session") {
+	if !strings.Contains(out, "terminated bob's session") {
 		t.Errorf("an applied revoke should report the teardown, got:\n%s", out)
 	}
 	if reachable(t, lab, "bob", "http://"+ikev2GatewayVIP+":8080/id") {

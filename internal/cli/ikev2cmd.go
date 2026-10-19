@@ -23,6 +23,14 @@ func runIKEv2(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Refused rather than ignored: "gotun ikev2 -server x user add alice" is a
+	// plausible thing to type, and silently generating a single-user
+	// configuration instead of adding a user is the kind of near-miss that
+	// gets discovered much later.
+	if fs.NArg() > 0 {
+		return fmt.Errorf("gotun ikev2: unexpected argument %q;"+
+			" subcommands come first, as in `gotun ikev2 user add <name> [flags]`", fs.Arg(0))
+	}
 	cfg, err := f.config()
 	if err != nil {
 		return err

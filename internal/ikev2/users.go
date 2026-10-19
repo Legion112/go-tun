@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,16 +15,16 @@ import (
 // Store is a directory of per-user swanctl snippets, one file each.
 //
 // One file per user rather than one file with N stanzas, because revocation is
-// then a delete rather than an edit: nothing has to parse and rewrite a
-// configuration that currently authenticates people. swanctl's own
+// then a delete: nothing has to parse and rewrite a configuration that is
+// currently authenticating other people. swanctl's own
 // `include conf.d/*.conf` does the assembly.
 //
-// Each file carries a whole connection, not just a secret. That is what buys a
-// fixed virtual IP: strongSwan's pools are per-connection and not
-// identity-aware, so one shared connection with several pools hands out
-// whichever address is free rather than the user's own. A connection per user
-// with a single-address pool pins it -- and names the SA after the user, so
-// `swanctl --list-sas` attributes traffic for free.
+// Each file is nothing but a credential -- a `secrets` stanza. The connection,
+// the pool and the traffic selectors are shared and come from
+// `gotun ikev2`, because charon already knows which identity owns which
+// session: `swanctl --list-sas` prints the EAP identity next to the assigned
+// address, so neither a per-user connection nor a pinned address is needed to
+// answer "who is this" or to end one person's session.
 type Store struct{ Dir string }
 
 // User is one named credential. The secret is deliberately absent: it exists
@@ -33,27 +32,17 @@ type Store struct{ Dir string }
 // and nowhere else.
 type User struct {
 	Name    string
-	VIP     netip.Addr
 	Created time.Time
-	// Revoked is set on a tombstone. It exists so an address is not handed to
-	// somebody else: reusing a revoked user's address would make every log
-	// entry from before the revocation attribute their traffic to whoever came
-	// next, which is the one thing a fixed address was for.
-	Revoked time.Time
 }
 
 const (
 	userFilePrefix = "gotun-user-"
 	userFileSuffix = ".conf"
-	// revokedSuffix deliberately does not match swanctl's include glob, so a
-	// tombstone is invisible to charon.
-	revokedSuffix = ".revoked"
 
-	// Header keys, so List can report what Add decided without re-deriving it.
+	// Header keys, so List can report what Add recorded without parsing
+	// swanctl.conf syntax.
 	hdrName    = "# gotun-user: "
-	hdrVIP     = "# gotun-vip: "
 	hdrCreated = "# gotun-created: "
-	hdrRevoked = "# gotun-revoked: "
 )
 
 // userNamePattern is both an IKE identity and part of a filename, which is why
@@ -75,10 +64,6 @@ func (s Store) path(name string) string {
 	return filepath.Join(s.Dir, userFilePrefix+name+userFileSuffix)
 }
 
-func (s Store) tombstonePath(name string) string {
-	return filepath.Join(s.Dir, userFilePrefix+name+revokedSuffix)
-}
-
 // List returns the users in the directory, ordered by name.
 func (s Store) List() ([]User, error) {
 	entries, err := os.ReadDir(s.Dir)
@@ -88,30 +73,13 @@ func (s Store) List() ([]User, error) {
 		}
 		return nil, err
 	}
-	return collect(s.Dir, entries, userFileSuffix)
-}
-
-// ListRevoked returns the tombstones: users who are gone but whose addresses
-// are still held back.
-func (s Store) ListRevoked() ([]User, error) {
-	entries, err := os.ReadDir(s.Dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return collect(s.Dir, entries, revokedSuffix)
-}
-
-func collect(dir string, entries []os.DirEntry, suffix string) ([]User, error) {
 	var out []User
 	for _, e := range entries {
 		n := e.Name()
-		if e.IsDir() || !strings.HasPrefix(n, userFilePrefix) || !strings.HasSuffix(n, suffix) {
+		if e.IsDir() || !strings.HasPrefix(n, userFilePrefix) || !strings.HasSuffix(n, userFileSuffix) {
 			continue
 		}
-		u, err := readUserHeader(filepath.Join(dir, n))
+		u, err := readUserHeader(filepath.Join(s.Dir, n))
 		if err != nil {
 			return nil, err
 		}
@@ -131,87 +99,46 @@ func readUserHeader(path string) (User, error) {
 		switch {
 		case strings.HasPrefix(line, hdrName):
 			u.Name = strings.TrimSpace(strings.TrimPrefix(line, hdrName))
-		case strings.HasPrefix(line, hdrVIP):
-			u.VIP, _ = netip.ParseAddr(strings.TrimSpace(strings.TrimPrefix(line, hdrVIP)))
 		case strings.HasPrefix(line, hdrCreated):
 			u.Created, _ = time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(line, hdrCreated)))
-		case strings.HasPrefix(line, hdrRevoked):
-			u.Revoked, _ = time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(line, hdrRevoked)))
 		}
 	}
-	if u.Name == "" || !u.VIP.IsValid() {
-		return User{}, fmt.Errorf("ikev2: %s is not a gotun user file (no name or VIP header);"+
-			" refusing to guess, because getting this wrong would hand a second user"+
-			" an address already in use", path)
+	if u.Name == "" {
+		return User{}, fmt.Errorf("ikev2: %s has no gotun-user header, so it is not a file"+
+			" this tool wrote; refusing to treat it as a user", path)
 	}
 	return u, nil
 }
 
-// Add creates a user: a fixed virtual IP, a generated secret, and the gateway
-// snippet that authenticates them. It returns the secret exactly once -- it is
-// never stored anywhere but the gateway file.
-func (s Store) Add(c Config, name string) (User, string, error) {
+// Add creates a user: a generated secret and the snippet that authenticates
+// them. It returns the secret exactly once -- it is never stored anywhere but
+// the gateway file.
+func (s Store) Add(name string) (User, string, error) {
 	if err := ValidateUserName(name); err != nil {
 		return User{}, "", err
 	}
-	if err := c.Validate(); err != nil {
+	if _, err := os.Stat(s.path(name)); err == nil {
+		return User{}, "", fmt.Errorf("ikev2: user %q already exists (%s); revoke it first"+
+			" -- reissuing in place would leave the old secret working until the next reload",
+			name, s.path(name))
+	} else if !os.IsNotExist(err) {
 		return User{}, "", err
-	}
-	c.withDefaults()
-
-	existing, err := s.List()
-	if err != nil {
-		return User{}, "", err
-	}
-	revoked, err := s.ListRevoked()
-	if err != nil {
-		return User{}, "", err
-	}
-	for _, u := range existing {
-		if u.Name == name {
-			return User{}, "", fmt.Errorf("ikev2: user %q already exists (%s); revoke it first"+
-				" -- reissuing in place would leave the old secret working until the next reload",
-				name, s.path(name))
-		}
-		// A pool that moved under existing users is the one way this quietly
-		// breaks: their files keep addresses the gateway no longer routes, and
-		// the symptom is one person's tunnel failing for no visible reason.
-		if !c.Pool.Contains(u.VIP) {
-			return User{}, "", fmt.Errorf("ikev2: existing user %q holds %v, which is outside"+
-				" the pool %v being used now; the pool cannot move while users exist",
-				u.Name, u.VIP, c.Pool)
-		}
 	}
 
-	for _, u := range revoked {
-		if u.Name == name {
-			return User{}, "", fmt.Errorf("ikev2: %q was revoked on %s and the name is held back"+
-				" with address %v; reissuing it would attribute their old traffic to the new"+
-				" credential. Use a different name, or `user purge %s` to release it",
-				name, u.Revoked.Format("2006-01-02"), u.VIP, name)
-		}
-	}
-
-	vip, err := allocateVIP(c, append(existing, revoked...))
-	if err != nil {
-		return User{}, "", err
-	}
 	secret, err := GenerateSecret()
 	if err != nil {
 		return User{}, "", err
 	}
-
-	u := User{Name: name, VIP: vip, Created: time.Now().UTC().Truncate(time.Second)}
-	snippet, err := RenderUser(c, u, secret)
+	u := User{Name: name, Created: time.Now().UTC().Truncate(time.Second)}
+	snippet, err := RenderUser(u, secret)
 	if err != nil {
 		return User{}, "", err
 	}
 	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return User{}, "", err
 	}
-	// 0600 because this file is the credential. Written with O_EXCL so a
-	// concurrent add cannot silently win and leave two users sharing an
-	// address.
+	// 0600 because this file is the credential. O_EXCL so a concurrent add
+	// cannot silently win and leave one of the two passwords unusable.
 	f, err := os.OpenFile(s.path(name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return User{}, "", err
@@ -226,11 +153,10 @@ func (s Store) Add(c Config, name string) (User, string, error) {
 	return u, secret, nil
 }
 
-// Remove deletes a user's gateway snippet and leaves a tombstone holding their
-// address.
+// Remove deletes a user's credential.
 //
 // It does not reload charon or tear down the live session; see the CLI, which
-// does both, because a revoke that only edited a file is not a revoke.
+// does both, because a revoke that only deleted a file is not a revoke.
 func (s Store) Remove(name string) (User, error) {
 	if err := ValidateUserName(name); err != nil {
 		return User{}, err
@@ -242,93 +168,45 @@ func (s Store) Remove(name string) (User, error) {
 		}
 		return User{}, err
 	}
-	u.Revoked = time.Now().UTC().Truncate(time.Second)
-
-	// The tombstone carries the headers and nothing else. It is written before
-	// the credential is deleted, so a crash in between leaves the address held
-	// rather than silently free.
-	tomb := fmt.Sprintf("%s%s\n%s%s\n%s%s\n%s%s\n"+
-		"#\n# Revoked. This file holds %v back so it is not handed to someone else,\n"+
-		"# which would attribute this user's earlier traffic to whoever came next.\n"+
-		"# It carries no credential. Release the address with: gotun ikev2 user purge %s\n",
-		hdrName, u.Name, hdrVIP, u.VIP,
-		hdrCreated, u.Created.UTC().Format(timeLayout),
-		hdrRevoked, u.Revoked.Format(timeLayout),
-		u.VIP, u.Name)
-	if err := os.WriteFile(s.tombstonePath(name), []byte(tomb), 0o644); err != nil {
-		return User{}, err
-	}
-	if err := os.Remove(s.path(name)); err != nil {
-		return User{}, err
-	}
-	return u, nil
+	return u, os.Remove(s.path(name))
 }
 
-// Purge releases a revoked name and its address for reuse.
+// RenderUser emits one user's credential, and nothing else.
 //
-// Separate from Remove and never automatic: it is the point at which old log
-// entries stop being attributable, so it should be a decision rather than a
-// side effect.
-func (s Store) Purge(name string) (User, error) {
-	if err := ValidateUserName(name); err != nil {
-		return User{}, err
+// Nothing else is the point. A per-user connection would be needed to pin a
+// per-user address, and a pinned address was the only way to attribute an old
+// packet log to a person -- but it also duplicates the whole traffic-selector
+// list per user, and charon already records the identity and the address it
+// handed out, together, at connect time. Logging that pair is the cheap way to
+// the same answer.
+func RenderUser(u User, secret string) (string, error) {
+	if err := ValidateUserName(u.Name); err != nil {
+		return "", err
 	}
-	u, err := readUserHeader(s.tombstonePath(name))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return User{}, fmt.Errorf("ikev2: no revoked user %q", name)
-		}
-		return User{}, err
+	if secret == "" {
+		return "", fmt.Errorf("ikev2: user %q has no secret", u.Name)
 	}
-	return u, os.Remove(s.tombstonePath(name))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%s\n%s%s\n", hdrName, u.Name, hdrCreated, u.Created.UTC().Format(timeLayout))
+	fmt.Fprintf(&b, `#
+# Generated by gotun ikev2 user add. THIS FILE IS A CREDENTIAL: mode 0600, and
+# it does not belong in a repository or a backup that others can read.
+#
+# Revoking %s means deleting this file AND reloading AND terminating the live
+# session. The first two alone do not revoke anything: the connection does not
+# reauthenticate, so an established session rekeys without consulting the
+# secret and survives indefinitely. Measured; see docs/ikev2-phone.md.
+#
+#   gotun ikev2 user revoke %s
+#
+secrets {
+  eap-%s {
+    id = %s
+    secret = "%s"
+  }
 }
-
-// allocateVIP picks the lowest free address in the pool.
-//
-// Lowest-free rather than random, so the mapping is predictable from the files
-// alone and an operator reading a firewall log can tell who it was. The
-// gateway's own tunnel-side address is skipped, as is anything an existing user
-// already holds -- an address is assigned once and then belongs to that user
-// until they are revoked.
-func allocateVIP(c Config, existing []User) (netip.Addr, error) {
-	taken := map[netip.Addr]string{}
-	for _, u := range existing {
-		taken[u.VIP] = u.Name
-	}
-	pool := c.Pool.Masked()
-	for addr := pool.Addr(); pool.Contains(addr); addr = addr.Next() {
-		if !addr.IsValid() {
-			break
-		}
-		if addr == c.VIPGateway {
-			continue
-		}
-		// The pool's own network and broadcast addresses are skipped for IPv4.
-		// charon would hand them out, and some clients will not use them.
-		if addr.Is4() && (addr == pool.Addr() || addr == lastAddrOfPrefix(pool)) {
-			continue
-		}
-		if _, dup := taken[addr]; dup {
-			continue
-		}
-		return addr, nil
-	}
-	return netip.Addr{}, fmt.Errorf("ikev2: pool %v is full (%d addresses held, including"+
-		" revoked users); widen -pool, or release a revoked name with `user purge`",
-		c.Pool, len(existing))
-}
-
-func lastAddrOfPrefix(p netip.Prefix) netip.Addr {
-	b := p.Masked().Addr().AsSlice()
-	for i := range b {
-		for bit := 0; bit < 8; bit++ {
-			if i*8+bit >= p.Bits() {
-				b[i] |= 1 << (7 - bit)
-			}
-		}
-	}
-	a, _ := netip.AddrFromSlice(b)
-	return a
+`, u.Name, u.Name, u.Name, u.Name, secret)
+	return b.String(), nil
 }
 
 // secretAlphabet omits characters that are misread when someone reads a
