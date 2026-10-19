@@ -114,6 +114,38 @@ func EncodeProfile(c Config) ([]byte, error) {
 	p.num(4, "NATKeepAliveInterval", c.KeepAliveInterval)
 	p.closeDict(3)
 
+	// A SIBLING of IKEv2, not a key inside it. Apple's schema puts DNS at the
+	// payload level because it applies to every VPN type, and iOS silently
+	// ignores an unknown key nested in the IKEv2 dictionary -- so getting this
+	// wrong produces a profile that installs cleanly, looks right, and changes
+	// nothing. Measured: zero queries arrived while it was nested.
+	//
+	// Without it the resolver this gateway pushes is configured and never
+	// used. A split tunnel is not the network's default route, so iOS treats
+	// the tunnel's DNS servers as supplemental, consulted only for the domains
+	// listed here.
+	if len(c.DNSMatchDomains) > 0 {
+		p.key(3, "DNS")
+		p.openDict(3)
+		p.key(4, "ServerAddresses")
+		p.raw(4, "<array>")
+		p.raw(5, "<string>"+escape(c.VIPGateway.String())+"</string>")
+		p.raw(4, "</array>")
+		p.key(4, "SupplementalMatchDomains")
+		p.raw(4, "<array>")
+		for _, d := range c.DNSMatchDomains {
+			// The empty string is deliberate and load-bearing: it is the
+			// documented way to match every domain.
+			p.raw(5, "<string>"+escape(d)+"</string>")
+		}
+		p.raw(4, "</array>")
+		// Not appended to the search list. An empty search domain is
+		// meaningless, and a real one would start completing bare hostnames in
+		// a way nobody asked for.
+		p.num(4, "SupplementalMatchDomainsNoSearch", 1)
+		p.closeDict(3)
+	}
+
 	// Connected by hand when on-demand is off, and the rules are omitted
 	// entirely rather than left present-but-inert: a rule list that is not
 	// being evaluated is the kind of thing somebody later reads as the

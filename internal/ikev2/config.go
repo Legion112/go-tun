@@ -116,6 +116,21 @@ type Config struct {
 	// HomeSSIDs are networks on which the phone should not connect, because
 	// the tunnel would hairpin back through the same uplink it exits from.
 	HomeSSIDs []string
+	// DNSMatchDomains decides which queries the phone sends to the gateway's
+	// resolver, and it is the difference between the resolver being used and
+	// being configured and ignored.
+	//
+	// A split tunnel is not the network's default route, so iOS treats the
+	// tunnel's DNS servers as SUPPLEMENTAL: consulted only for domains in this
+	// list. An empty list therefore means the resolver is never used at all --
+	// measured on a live phone, zero queries arrived while charon dutifully
+	// pushed the address on every connect.
+	//
+	// The single empty string is the documented way to say "everything": it
+	// becomes the default domain, so all queries go to the tunnel's resolver
+	// first. Nil means emit no DNS settings, which is the state above.
+	DNSMatchDomains []string
+
 	// OnDemandDisabled ships a profile the person connects by hand.
 	//
 	// It exists for a first test against a gateway that is not reachable from

@@ -2,8 +2,12 @@ package cli
 
 import (
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/legion/go-tun/internal/ikev2"
+	"github.com/legion/go-tun/internal/prefixes"
 )
 
 // fakeRunner records what was run and replies from a script.
@@ -197,5 +201,54 @@ func TestApplyRevoke_StopsIfTheReloadFailed(t *testing.T) {
 	}
 	if len(r.calls) != 1 {
 		t.Errorf("nothing should follow a failed reload, got %v", r.calls)
+	}
+}
+
+// `user add` and `user profile` must produce byte-identical profiles for the
+// same person. iOS keys an installed profile by its PayloadUUID, which is
+// derived from the payload identifier, which is derived from the display name
+// -- so a reissue that got the name wrong would install a SECOND VPN entry
+// beside the first instead of replacing it, leaving two with the same label
+// and no way to tell which one is in use.
+func TestUserProfileConfig_AddAndReissueAgree(t *testing.T) {
+	base := ikev2.Config{
+		Server:     "vpn.example.net",
+		VIPSubnet:  netip.MustParsePrefix("10.231.17.0/24"),
+		VIPGateway: netip.MustParseAddr("10.231.17.1"),
+		Pool:       netip.MustParsePrefix("10.231.17.16/28"),
+		NonRoutable: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"),
+			netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("100.64.0.0/10"),
+			netip.MustParsePrefix("169.254.0.0/16"), netip.MustParsePrefix("127.0.0.0/8"),
+			netip.MustParsePrefix("224.0.0.0/4"),
+		},
+		Families: prefixes.Families{V4: true},
+	}
+
+	// The default display name and an unset one must land on the same thing,
+	// because `add` passes the flag's default and a careless reissue passes
+	// nothing.
+	fromAdd, err := ikev2.EncodeProfile(userProfileConfig(base, "alice", "gotun"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromReissue, err := ikev2.EncodeProfile(userProfileConfig(base, "alice", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(fromAdd) != string(fromReissue) {
+		t.Error("add and reissue produced different profiles for the same user")
+	}
+
+	// And a different person must not collide with them.
+	other, err := ikev2.EncodeProfile(userProfileConfig(base, "bob", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(other) == string(fromAdd) {
+		t.Error("two users got the same profile")
+	}
+	if !strings.Contains(string(fromAdd), "<string>alice</string>") {
+		t.Error("the profile does not carry the user's identity")
 	}
 }

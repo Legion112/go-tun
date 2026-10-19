@@ -542,3 +542,94 @@ func TestProfile_OnDemandCanBeShippedOff(t *testing.T) {
 		t.Error("the VPN payload went missing")
 	}
 }
+
+// The resolver a split tunnel pushes is configured and then never used unless
+// the profile says which queries belong to it: iOS treats a non-default-route
+// tunnel's DNS servers as supplemental, consulted only for the domains listed.
+// Measured on a live phone -- charon pushed the address on every connect and
+// zero queries ever arrived.
+func TestProfile_DNSMatchDomainsDecideWhetherTheResolverIsUsedAtAll(t *testing.T) {
+	c := testConfig()
+	c.DNSMatchDomains = []string{""}
+	b, err := ikev2.EncodeProfile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+
+	if !strings.Contains(got, "<key>DNS</key>") {
+		t.Fatalf("no DNS settings:\n%s", got)
+	}
+	// Placement, not just presence. Apple puts DNS at the payload level
+	// because it applies to every VPN type, and iOS silently ignores an
+	// unknown key nested inside the IKEv2 dictionary -- a profile with it in
+	// the wrong place installs cleanly, looks right and changes nothing. That
+	// is how this shipped once.
+	if indentOf(t, got, "<key>DNS</key>") != indentOf(t, got, "<key>IKEv2</key>") {
+		t.Errorf("DNS must be a sibling of IKEv2, not nested inside it:\n%s", got)
+	}
+	if !strings.Contains(got, "<string>"+c.VIPGateway.String()+"</string>") {
+		t.Error("the resolver address is not the one the pool pushes")
+	}
+	// The empty string is the documented way to match every domain, and it has
+	// to survive serialisation as an actually-empty element: <string></string>,
+	// not a self-closed or whitespace-bearing one.
+	i := strings.Index(got, "<key>SupplementalMatchDomains</key>")
+	if i < 0 {
+		t.Fatal("no SupplementalMatchDomains")
+	}
+	window := got[i:min(len(got), i+200)]
+	if !strings.Contains(window, "<string></string>") {
+		t.Errorf("the match-all empty string did not survive:\n%s", window)
+	}
+	if !strings.Contains(got, "<key>SupplementalMatchDomainsNoSearch</key>") {
+		t.Error("an empty search domain would be meaningless; it must be suppressed")
+	}
+}
+
+// A named list sends only those queries to the gateway, leaving everything else
+// on the phone's own resolver.
+func TestProfile_DNSMatchCanBeNarrowedToDomains(t *testing.T) {
+	c := testConfig()
+	c.DNSMatchDomains = []string{"ru", "lan"}
+	b, err := ikev2.EncodeProfile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, d := range []string{"<string>ru</string>", "<string>lan</string>"} {
+		if !strings.Contains(got, d) {
+			t.Errorf("missing %s", d)
+		}
+	}
+	if strings.Contains(got, "<string></string>") {
+		t.Error("a narrowed list must not also match everything")
+	}
+}
+
+// Nil emits nothing, which is the state the profile was in before: the
+// resolver pushed by IKEv2 and never consulted.
+func TestProfile_DNSSettingsCanBeOmitted(t *testing.T) {
+	c := testConfig()
+	c.DNSMatchDomains = nil
+	b, err := ikev2.EncodeProfile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "<key>DNS</key>") {
+		t.Error("no DNS settings were asked for")
+	}
+}
+
+// indentOf reports how many tabs precede a line, which is how the structural
+// placement of a key is checked without pulling in a plist parser.
+func indentOf(t *testing.T, doc, key string) int {
+	t.Helper()
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.TrimSpace(line) == key {
+			return len(line) - len(strings.TrimLeft(line, "\t"))
+		}
+	}
+	t.Fatalf("%s not found", key)
+	return -1
+}

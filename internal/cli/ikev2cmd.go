@@ -48,6 +48,7 @@ type ikev2Flags struct {
 	probeURL, homeSSID          *string
 	ifID, serverCert, dpd       *string
 	caFile, onDemand            *string
+	dnsMatch                    *string
 	keepalive                   *int
 	name, identifier            *string
 }
@@ -85,6 +86,11 @@ func registerIKEv2Flags(fs *flag.FlagSet) *ikev2Flags {
 			" hand, which is what a first test against a gateway that is not reachable from"+
 			" everywhere wants: on-demand with no probe makes the phone hold traffic wherever"+
 			" it cannot reach the gateway")
+	f.dnsMatch = fs.String("dns-match", "all",
+		"which DNS queries the phone sends to the gateway's resolver: all, none, or a"+
+			" comma-separated domain list. A split tunnel is not the default route, so iOS"+
+			" consults the tunnel's resolver only for domains named here -- none means the"+
+			" resolver is pushed and then never used, which is measurably what happens")
 	f.caFile = fs.String("ca", "",
 		"PEM file of the CA that signed the gateway certificate, embedded in the profile as a"+
 			" root payload. Required unless the gateway certificate is publicly trusted:"+
@@ -117,6 +123,7 @@ func (f *ikev2Flags) config() (ikev2.Config, error) {
 		HomeSSIDs:         splitCSV(*f.homeSSID),
 		DPDRate:           strings.TrimSpace(*f.dpd),
 		KeepAliveInterval: *f.keepalive,
+		DNSMatchDomains:   dnsMatchDomains(*f.dnsMatch),
 		OnDemandDisabled:  !truthy(*f.onDemand),
 		ProfileName:       strings.TrimSpace(*f.name),
 		Identifier:        strings.TrimSpace(*f.identifier),
@@ -148,6 +155,21 @@ func (f *ikev2Flags) config() (ikev2.Config, error) {
 		cfg.NonRoutable = policy.DefaultNonRoutable()
 	}
 	return cfg, nil
+}
+
+// dnsMatchDomains translates the flag into the list the profile carries.
+//
+// "all" becomes the single empty string, which is the documented way to say
+// "every domain" -- it becomes the default domain and all queries go to the
+// tunnel's resolver first.
+func dnsMatchDomains(v string) []string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none":
+		return nil
+	case "all":
+		return []string{""}
+	}
+	return splitCSV(v)
 }
 
 func parsePrefixFlag(name, v string) (netip.Prefix, error) {
@@ -212,6 +234,11 @@ func ExportIKEv2(cfg ikev2.Config, outSwanctl, outProfile string) error {
 	} else {
 		fmt.Fprintln(os.Stderr, "  4. no -probe-url given: the profile connects unconditionally,"+
 			" so an unreachable gateway holds traffic instead of releasing it")
+	}
+	if len(cfg.DNSMatchDomains) == 0 {
+		fmt.Fprintln(os.Stderr, "gotun ikev2: -dns-match none, so the resolver this gateway"+
+			" pushes will be configured on the phone and never used: a split tunnel is not the"+
+			" default route, so iOS treats it as supplemental and nothing matches.")
 	}
 	if len(cfg.CAPEM) == 0 {
 		fmt.Fprintln(os.Stderr, "gotun ikev2: no -ca given, so the profile trusts nothing of its"+

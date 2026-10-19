@@ -22,17 +22,19 @@ const DefaultUserDir = "/etc/swanctl/conf.d"
 
 func runIKEv2User(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gotun ikev2 user <add|list|revoke> <name> [flags]")
+		return fmt.Errorf("usage: gotun ikev2 user <add|profile|list|revoke> <name> [flags]")
 	}
 	switch args[0] {
 	case "add":
 		return runUserAdd(args[1:])
+	case "profile":
+		return runUserProfile(args[1:])
 	case "list":
 		return runUserList(args[1:])
 	case "revoke":
 		return runUserRevoke(args[1:])
 	default:
-		return fmt.Errorf("unknown ikev2 user command %q (want add, list or revoke)", args[0])
+		return fmt.Errorf("unknown ikev2 user command %q (want add, profile, list or revoke)", args[0])
 	}
 }
 
@@ -66,25 +68,15 @@ func runUserAdd(args []string) error {
 	}
 	// The profile's identity has to be the user: it is what the phone sends as
 	// its EAP identity, and therefore which secret the gateway looks up.
-	cfg.ClientID = name
-	if strings.TrimSpace(*f.name) == "" || *f.name == "gotun" {
-		cfg.ProfileName = "gotun " + name
-	}
+	cfg = userProfileConfig(cfg, name, *f.name)
 
 	u, secret, err := ikev2.Store{Dir: *dir}.Add(name)
 	if err != nil {
 		return err
 	}
 
-	profilePath := strings.TrimSpace(*outProfile)
-	if profilePath == "" {
-		profilePath = name + ".mobileconfig"
-	}
-	profile, err := ikev2.EncodeProfile(cfg)
+	profilePath, err := writeUserProfile(cfg, name, *outProfile)
 	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(profilePath, profile, 0o600); err != nil {
 		return err
 	}
 
@@ -109,6 +101,87 @@ func runUserAdd(args []string) error {
 		}
 		fmt.Println("gotun ikev2: charon reloaded; the user can connect now")
 	}
+	return nil
+}
+
+// userProfileConfig applies the per-user parts of the description, in one place
+// so that `add` and `profile` cannot produce different profiles for the same
+// person. The display name matters as much as the identity: it feeds the
+// payload identifier, which feeds the UUID, and iOS keys an installed profile
+// by that -- a reissue under a different name installs a SECOND VPN entry
+// beside the first rather than replacing it.
+func userProfileConfig(cfg ikev2.Config, name string, displayName string) ikev2.Config {
+	cfg.ClientID = name
+	if strings.TrimSpace(displayName) == "" || displayName == "gotun" {
+		cfg.ProfileName = "gotun " + name
+	}
+	return cfg
+}
+
+func writeUserProfile(cfg ikev2.Config, name, out string) (string, error) {
+	path := strings.TrimSpace(out)
+	if path == "" {
+		path = name + ".mobileconfig"
+	}
+	profile, err := ikev2.EncodeProfile(cfg)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, profile, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// runUserProfile reissues somebody's profile without touching their
+// credential.
+//
+// Needed whenever the description changes -- a new address, different
+// on-demand rules, DNS settings -- because rotating everybody's password to
+// deliver a configuration change would be absurd, and because the alternative
+// of hand-building the profile with the plain `ikev2` command gets the display
+// name wrong and installs a duplicate VPN entry.
+func runUserProfile(args []string) error {
+	name, rest, err := userName(args)
+	if err != nil {
+		return fmt.Errorf("usage: gotun ikev2 user profile <name> [flags]: %w", err)
+	}
+	fs := flag.NewFlagSet("ikev2 user profile", flag.ContinueOnError)
+	f := registerIKEv2Flags(fs)
+	dir := fs.String("dir", DefaultUserDir, "directory of per-user swanctl snippets")
+	outProfile := fs.String("out-profile", "", "output path; empty means <name>.mobileconfig")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	cfg, err := f.config()
+	if err != nil {
+		return err
+	}
+
+	// Refuse for somebody who does not exist: a profile naming an identity the
+	// gateway has no secret for installs cleanly and then fails to connect,
+	// with nothing saying why.
+	users, err := ikev2.Store{Dir: *dir}.List()
+	if err != nil {
+		return err
+	}
+	var known bool
+	for _, u := range users {
+		if u.Name == name {
+			known = true
+		}
+	}
+	if !known {
+		return fmt.Errorf("gotun ikev2: no user %q in %s; `user add` creates one", name, *dir)
+	}
+
+	path, err := writeUserProfile(userProfileConfig(cfg, name, *f.name), name, *outProfile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("gotun ikev2: iOS profile for %s → %s\n", name, path)
+	fmt.Fprintln(os.Stderr, "gotun ikev2: their password is unchanged. Installing this over the"+
+		" old profile replaces it -- the UUID is derived from the identifier, not random.")
 	return nil
 }
 
