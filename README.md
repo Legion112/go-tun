@@ -163,7 +163,7 @@ gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
 
 `-lan` feeds both mark exclusions and the `home_nets` isolation set.
 
-### An inbound interface gotun does not own (`-clients-iface`)
+### Inbound interfaces gotun does not own (`-clients-iface`)
 
 `-wg-clients-config` makes gotun hold the inbound private key and manage the
 device. On a router that is the wrong shape twice over: netifd owns the
@@ -174,24 +174,45 @@ has no key to hold.
 ```bash
 gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
   -lan 192.168.8.0/24 \
-  -clients-iface ipsec0 \
-  -mark-iface br-lan,ipsec0 \
+  -clients-iface ipsec0,wgphone \
+  -mark-iface br-lan,ipsec0,wgphone \
   -tunnel-iface xray0
 ```
 
-The name cannot be defaulted: UCI section names cannot contain hyphens, so a
-netifd-created device can never be called `wg-clients`.
+The names cannot be defaulted: UCI section names cannot contain hyphens, so a
+netifd-created device can never be called `wg-clients`, and an xfrm interface is
+named by whoever created it.
 
-Two refusals come with it, both because the alternative is silent:
+### Several transports at once
+
+The flag takes a **list**, because a gateway carries more than one inbound
+transport at a time and they are not interchangeable. A phone on IKEv2 arrives
+on an xfrm interface, a laptop on WireGuard on a netifd one, and a desktop
+inside the house on a bridge — all three get the same RU / non-RU decision, and
+each inbound device needs its own `home_nets` rule.
+
+Isolating only the first leaves clients on the others with the geo split **and**
+unrestricted access to the home LAN. That combination works, which is exactly
+why nothing reports it. Proven simultaneously by
+`TestMultiTransport_EveryPathGetsSmartRoutingAtOnce`.
+
+Four refusals come with it, all because the alternative is silent:
 
 - **LANs are required.** `home_nets` isolation with nothing to isolate is a rule
   that drops nothing.
-- **The interface must appear in `-mark-iface`** whenever that list is non-empty.
-  A clients interface missing from the ingress guard means traffic arriving on it
-  is never marked, so those clients follow `main` out the ISP while every other
-  client is tunnelled — and nothing anywhere reports it. This is not
-  hypothetical: the live router ran `-mark-iface br-lan` with `br-guest` and
-  `br-iot` up.
+- **Every interface must appear in `-mark-iface`** whenever that list is
+  non-empty. A clients interface missing from the ingress guard means traffic
+  arriving on it is never marked, so those clients follow `main` out the ISP
+  while every other client is tunnelled — and nothing anywhere reports it. This
+  is not hypothetical: the live router ran `-mark-iface br-lan` with `br-guest`
+  and `br-iot` up.
+- **A name that is not one interface name** is rejected whatever `-mark-iface`
+  says: a comma, whitespace, a slash, or more than 15 characters. An unsplit
+  list renders as `iifname "ipsec0,wgphone"`, which matches a device that cannot
+  exist, so isolation applies to nothing while `apply` reports success.
+- **`-wg-clients-config` with more than one clients interface.** gotun can own
+  exactly one inbound WireGuard device, and which of several it owns is not
+  something to guess.
 
 Isolation is a **forward** hook rule, so it covers inbound peer → LAN host and
 nothing else. Traffic addressed to the router's own LAN address goes to input and
@@ -274,6 +295,7 @@ deploy_topo_test.go    → RU vs external Internet, egress identity
 phone_deploy_test.go   → a phone tunnelling in over WireGuard
 ikev2_phone_test.go    → the same over IKEv2/IPsec: narrowed selectors,
                          MOBIKE roaming, and the generated config in charon
+multitransport_test.go → IKEv2 + WireGuard + the home LAN, all at once
 ```
 
 `TestDeployTopo_EgressIdentity` places the Pi **only** on home LAN. A remote client on RU Internet reaches the Pi via home-router DNAT. The physical RU↔external uplink remains; the test proves path choice by **source identity** at destinations (`labhttp` `GET /peer` from `RemoteAddr`):
@@ -304,7 +326,7 @@ gotun amnezia -mmdb data/geo/GeoIP2-City.mmdb -out amnezia-sites.json -format of
 gotun amnezia -out amnezia-sites.json -format ios   # CSV download; CIDR in ip (iOS import workaround)
 gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg-exit.conf -tunnel-up true
 gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
-gotun apply ... -clients-iface ipsec0 -mark-iface br-lan,ipsec0   # inbound iface gotun does not own
+gotun apply ... -clients-iface ipsec0,wgphone -mark-iface br-lan,ipsec0,wgphone   # inbound ifaces gotun does not own
 gotun ikev2 -server vpn.example.net -vip-subnet 10.231.17.0/24 \
   -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
   -probe-url http://vpn.example.net:8443/alive        # swanctl config + iOS .mobileconfig

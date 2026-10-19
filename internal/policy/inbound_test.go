@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ import (
 // isolation silently does not exist there.
 func TestCompile_InboundIsolationWithoutManagedKeys(t *testing.T) {
 	p := testPolicy(true)
-	p.ClientsInterface = "wgphone"
+	p.ClientsInterfaces = []string{"wgphone"}
 
 	st, err := policy.Compile(p)
 	if err != nil {
@@ -72,7 +73,7 @@ func TestCompile_InboundIsolationWithoutManagedKeys(t *testing.T) {
 // box is not ours to choose.
 func TestCompile_ClientsInterfaceOverridesDefaultWhenManaged(t *testing.T) {
 	p := testPolicy(true)
-	p.ClientsInterface = "wgphone"
+	p.ClientsInterfaces = []string{"wgphone"}
 	p.InboundWireGuard = policy.WireGuardConfig{
 		PrivateKey: "CLIENTPRIV",
 		ListenPort: 51821,
@@ -106,7 +107,7 @@ func TestCompile_ClientsInterfaceOverridesDefaultWhenManaged(t *testing.T) {
 // it here would put every phone flow out the ISP while looking healthy.
 func TestCompile_RejectsClientsIfaceMissingFromMarkIfaces(t *testing.T) {
 	p := testPolicy(true)
-	p.ClientsInterface = "wgphone"
+	p.ClientsInterfaces = []string{"wgphone"}
 	p.MarkIIfNames = []string{"br-lan"}
 
 	_, err := policy.Compile(p)
@@ -132,7 +133,7 @@ func TestCompile_RejectsClientsIfaceMissingFromMarkIfaces(t *testing.T) {
 // the box it runs on.
 func TestCompile_InboundIsolationIsForwardOnlyByDesign(t *testing.T) {
 	p := testPolicy(true)
-	p.ClientsInterface = "wgphone"
+	p.ClientsInterfaces = []string{"wgphone"}
 
 	st, err := policy.Compile(p)
 	if err != nil {
@@ -150,5 +151,112 @@ func TestCompile_InboundIsolationIsForwardOnlyByDesign(t *testing.T) {
 		if ch.Hook == "input" {
 			t.Errorf("gotun must not own an input chain (host firewall's job): %+v", ch)
 		}
+	}
+}
+
+// A gateway carries more than one inbound transport at a time, and they are not
+// interchangeable: a phone on IKEv2 arrives on an xfrm interface while a laptop
+// on WireGuard arrives on a netifd-created one.
+//
+// Isolating only the first leaves the second with the geo split *and*
+// unrestricted access to the home LAN. That combination works, which is why
+// nothing reports it.
+func TestCompile_IsolatesEveryInboundInterface(t *testing.T) {
+	p := testPolicy(true)
+	p.ClientsInterfaces = []string{"ipsec0", "wgphone"}
+	p.LANs = append(p.LANs, netip.MustParsePrefix("fd00:10::/64"))
+	p.IPv6 = policy.IPv6On
+	p.MarkIIfNames = []string{"br-lan", "ipsec0", "wgphone"}
+
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string][]policy.Family{}
+	for _, ch := range st.Nft.Chains {
+		if ch.Hook != "forward" {
+			continue
+		}
+		for _, r := range ch.Rules {
+			if r.Description == "isolate-inbound-from-home" {
+				got[r.IIfName] = append(got[r.IIfName], r.Family)
+			}
+		}
+	}
+	for _, dev := range p.ClientsInterfaces {
+		fams := got[dev]
+		if len(fams) != 2 {
+			t.Errorf("%s: want an isolation rule per family, got %v", dev, fams)
+		}
+	}
+	// And the ingress guard has to cover them, or the rules above protect
+	// clients who were never classified in the first place.
+	for _, ch := range st.Nft.Chains {
+		for _, r := range ch.Rules {
+			if len(r.IIfNames) == 0 {
+				continue
+			}
+			for _, dev := range p.ClientsInterfaces {
+				if !slices.Contains(r.IIfNames, dev) {
+					t.Errorf("ingress guard %v omits %s", r.IIfNames, dev)
+				}
+			}
+		}
+	}
+}
+
+// A name carrying a comma is a list that was never split. It renders as an nft
+// rule matching an interface that cannot exist, so isolation applies to nothing
+// while apply reports success -- and the ingress-guard check cannot catch it,
+// because with -mark-iface empty there is no guard to compare against.
+func TestCompile_RejectsAnInterfaceNameThatIsAList(t *testing.T) {
+	cases := []struct {
+		name  string
+		ifs   []string
+		marks []string
+	}{
+		{name: "comma, no ingress guard", ifs: []string{"ipsec0,wgphone"}},
+		{
+			name:  "comma, with an ingress guard",
+			ifs:   []string{"ipsec0,wgphone"},
+			marks: []string{"br-lan", "ipsec0", "wgphone"},
+		},
+		{name: "space", ifs: []string{"ipsec0 wgphone"}},
+		{name: "empty entry", ifs: []string{"ipsec0", ""}},
+		{name: "longer than IFNAMSIZ", ifs: []string{"ipsec0123456789abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testPolicy(true)
+			p.ClientsInterfaces = tc.ifs
+			p.MarkIIfNames = tc.marks
+			if _, err := policy.Compile(p); err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}
+
+// gotun can own exactly one inbound WireGuard device, and which of several it
+// owns is not something to guess. The combination does not arise on the real
+// router -- there netifd owns the device and gotun holds no key -- so refusing
+// it removes an implicit "the first one" rule nobody would find.
+func TestCompile_RejectsManagedInboundWithSeveralClientsInterfaces(t *testing.T) {
+	p := testPolicy(true)
+	p.ClientsInterfaces = []string{"wgphone", "ipsec0"}
+	p.MarkIIfNames = []string{"br-lan", "wgphone", "ipsec0"}
+	p.InboundWireGuard = policy.WireGuardConfig{
+		PrivateKey: "CLIENTPRIV",
+		ListenPort: 51821,
+		Addresses:  []netip.Prefix{netip.MustParsePrefix("10.98.0.1/30")},
+		Peer:       policy.WireGuardPeer{PublicKey: "PHONE"},
+	}
+	_, err := policy.Compile(p)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "one inbound WireGuard device") {
+		t.Errorf("error should explain why, got: %v", err)
 	}
 }

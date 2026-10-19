@@ -246,15 +246,23 @@ type Policy struct {
 	// InboundWireGuard is the clients-facing listen interface (WAN peers via port-forward).
 	// When set (PrivateKey non-empty), compile installs home_nets forward isolation.
 	InboundWireGuard WireGuardConfig
-	// ClientsInterface names the inbound clients-facing device when gotun does
-	// not manage it. It exists separately from InboundWireGuard because on
-	// OpenWrt netifd owns the device and gotun deliberately holds no private
-	// key, so there is no WireGuardConfig to infer a name from. The name cannot
-	// be defaulted either: UCI section names cannot contain hyphens, so a
-	// netifd-created device can never be called "wg-clients".
+	// ClientsInterfaces name the inbound clients-facing devices when gotun
+	// does not manage them. They exist separately from InboundWireGuard because
+	// on OpenWrt netifd owns the device and gotun deliberately holds no private
+	// key, so there is no WireGuardConfig to infer a name from. The names
+	// cannot be defaulted either: UCI section names cannot contain hyphens, so
+	// a netifd-created device can never be called "wg-clients", and an xfrm
+	// interface is named by whoever created it.
+	//
+	// A list rather than one name, because a gateway carries more than one
+	// inbound transport at a time and they are not interchangeable. A phone on
+	// IKEv2 arrives on an xfrm interface and a laptop on WireGuard on a netifd
+	// one; each needs its own home_nets isolation rule, and isolating only the
+	// first leaves the second with the geo split AND unrestricted access to the
+	// home LAN -- which works, so nothing reports it.
 	//
 	// Empty means DefaultClientsIface.
-	ClientsInterface string
+	ClientsInterfaces []string
 	// MarkIIfNames restricts marking to these ingress interfaces. Empty means
 	// mark traffic arriving on any interface, which is safe on a dedicated
 	// gateway box but not on a router: the prerouting hook also sees WAN-inbound

@@ -346,6 +346,34 @@ Pinned at one, two and three interfaces in
 round-trips cleanly either way and every test in the package classified exactly
 one interface until now.
 
+### Three transports at once
+
+`TestMultiTransport_EveryPathGetsSmartRoutingAtOnce` is the shape the gateway
+actually runs in: a phone on IKEv2, a laptop on WireGuard and a desktop on the
+home LAN, simultaneously, all getting the same decision. Each reaches the
+classifier through a different kind of device -- an xfrm interface, a WireGuard
+interface, a bridge -- so gotun has to treat them as three inbound devices
+rather than one.
+
+`-clients-iface` therefore takes a list. Before it did, the isolation rule
+existed for whichever device happened to be named, and clients on the others got
+the geo split **and** unrestricted access to the home LAN -- a combination that
+works, so nothing reported it. Verified by naming one device in the lab: the
+laptop then reaches the NAS and the live table has no rule for its interface.
+
+Running the transports in sequence would not have asked the question. They share
+one classifier, one routing table and one exit hop, which is why every path is
+exercised again at the end, after the others have been used.
+
+Two refusals landed alongside the list. A clients interface whose name carries a
+comma, whitespace or a slash is rejected whatever `-mark-iface` says, because an
+unsplit list renders as `iifname "ipsec0,wgphone"` and matches a device that
+cannot exist -- isolation applies to nothing while apply reports success, and
+the ingress-guard check cannot catch it when `-mark-iface` is empty. And
+`-wg-clients-config` with more than one clients interface is refused outright:
+gotun can own exactly one inbound WireGuard device, and picking one of several
+implicitly is the kind of guess this codebase does not make.
+
 ### Three more tests, since
 
 **MOBIKE**, in `TestIKEv2Phone_MOBIKESurvivesAccessNetworkChange`. Two access

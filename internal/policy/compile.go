@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // Compile turns a Policy into a declarative DesiredKernelState.
@@ -30,7 +31,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	if iface == "" {
 		iface = DefaultTunnelIface
 	}
-	clientsIface := effectiveClientsIface(p)
+	clientsIfaces := effectiveClientsIfaces(p)
 
 	// MandatoryNonRoutable is unioned in rather than replaced by the operator's
 	// list: an override that forgot IPv6 link-local and multicast would mark
@@ -102,13 +103,19 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Flags:    []string{"interval"},
 			Elements: slices.Clone(lan4),
 		})
-		forwardRules := []NftRuleSpec{
-			{
+		// One rule per inbound device, because a gateway can carry more than one
+		// at a time and they are not interchangeable. A phone on IKEv2 and a
+		// laptop on WireGuard arrive on different interfaces, and isolating only
+		// the first leaves the second with the geo split *and* unrestricted
+		// access to the home LAN -- working, so nothing reports it.
+		var forwardRules []NftRuleSpec
+		for _, dev := range clientsIfaces {
+			forwardRules = append(forwardRules, NftRuleSpec{
 				Description: "isolate-inbound-from-home",
 				Family:      FamilyV4,
-				IIfName:     clientsIface,
+				IIfName:     dev,
 				DropDstSet:  HomeNetsSetName,
-			},
+			})
 		}
 		// The IPv6 half only exists when there is a v6 home net to isolate.
 		// An empty home_nets6 would drop nothing, which is fine, but an
@@ -121,12 +128,14 @@ func Compile(p Policy) (DesiredKernelState, error) {
 				Flags:    []string{"interval"},
 				Elements: slices.Clone(lan6),
 			})
-			forwardRules = append(forwardRules, NftRuleSpec{
-				Description: "isolate-inbound-from-home",
-				Family:      FamilyV6,
-				IIfName:     clientsIface,
-				DropDstSet:  HomeNetsSetNameV6,
-			})
+			for _, dev := range clientsIfaces {
+				forwardRules = append(forwardRules, NftRuleSpec{
+					Description: "isolate-inbound-from-home",
+					Family:      FamilyV6,
+					IIfName:     dev,
+					DropDstSet:  HomeNetsSetNameV6,
+				})
+			}
 		}
 		chains = append(chains, NftChainSpec{
 			Name:     "forward",
@@ -255,7 +264,10 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			RouteAllowedIPs: p.TunnelUp,
 		},
 		WireGuardClients: WireGuardSpec{
-			Interface:       clientsIface,
+			// gotun can own at most one inbound WireGuard device, so when it
+			// does, the name is the single clients interface. validate refuses
+			// the ambiguous combination rather than picking one of several.
+			Interface:       clientsIfaces[0],
 			PrivateKey:      p.InboundWireGuard.PrivateKey,
 			ListenPort:      p.InboundWireGuard.ListenPort,
 			Addresses:       slices.Clone(p.InboundWireGuard.Addresses),
@@ -537,12 +549,51 @@ func validate(p Policy) error {
 		// way this becomes visible.
 		//
 		// An empty MarkIIfNames classifies every interface, so it covers the
-		// inbound device by construction and is not an error here. It has its
+		// inbound devices by construction and is not an error here. It has its
 		// own warning at the CLI boundary.
-		if ci := effectiveClientsIface(p); len(p.MarkIIfNames) > 0 && !slices.Contains(p.MarkIIfNames, ci) {
-			return fmt.Errorf("policy: clients interface %q is not in MarkIIfNames %v, so traffic"+
-				" arriving on it would never be classified", ci, p.MarkIIfNames)
+		for _, ci := range effectiveClientsIfaces(p) {
+			// Checked whatever MarkIIfNames says, because this one is about the
+			// name itself rather than about the guard. A name carrying a comma
+			// is a list that was never split -- "ipsec0,wgphone" renders as an
+			// nft rule matching an interface that cannot exist, so isolation
+			// applies to nothing while apply reports success.
+			if err := validIfaceName(ci); err != nil {
+				return err
+			}
+			if len(p.MarkIIfNames) > 0 && !slices.Contains(p.MarkIIfNames, ci) {
+				return fmt.Errorf("policy: clients interface %q is not in MarkIIfNames %v, so traffic"+
+					" arriving on it would never be classified", ci, p.MarkIIfNames)
+			}
 		}
+		// gotun can own exactly one inbound WireGuard device, and which of
+		// several it owns is not something to guess. The combination does not
+		// arise on the real router -- there netifd owns the device and gotun
+		// holds no key -- so refusing it costs nothing and removes an implicit
+		// "the first one" rule nobody would find.
+		if p.InboundWireGuard.PrivateKey != "" && len(p.ClientsInterfaces) > 1 {
+			return fmt.Errorf("policy: gotun manages one inbound WireGuard device but %v clients"+
+				" interfaces are named (%v); drop -wg-clients-config, or name only the device"+
+				" gotun owns", len(p.ClientsInterfaces), p.ClientsInterfaces)
+		}
+	}
+	return nil
+}
+
+// validIfaceName rejects a name that cannot be a Linux interface.
+//
+// Length and the separators are what matter here: IFNAMSIZ is 16 including the
+// terminator, and a name containing a comma, whitespace or a slash is almost
+// always a list or a path that was never split. Either way the rendered nft rule
+// matches a device that cannot exist, which is indistinguishable from working.
+func validIfaceName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("policy: empty clients interface name")
+	case len(name) > 15:
+		return fmt.Errorf("policy: clients interface %q is longer than Linux allows (15 characters)", name)
+	case strings.ContainsAny(name, ", \t/"):
+		return fmt.Errorf("policy: clients interface %q contains a comma, whitespace or a slash,"+
+			" so it is not one interface name; pass a comma-separated list instead", name)
 	}
 	return nil
 }
@@ -550,20 +601,25 @@ func validate(p Policy) error {
 // inboundPresent reports whether an inbound clients-facing device exists at
 // all, whether or not gotun manages it.
 func inboundPresent(p Policy) bool {
-	return p.InboundWireGuard.PrivateKey != "" || p.ClientsInterface != ""
+	return p.InboundWireGuard.PrivateKey != "" || len(p.ClientsInterfaces) > 0
 }
 
-// effectiveClientsIface is the inbound device's name.
+// effectiveClientsIfaces are the inbound devices' names.
 //
-// The name cannot be inferred and cannot sensibly be defaulted on a router:
+// A list, because a gateway can carry more than one inbound transport at once
+// and they are not interchangeable: a phone on IKEv2 arrives on an xfrm
+// interface while a laptop on WireGuard arrives on a netifd-created one, and
+// each needs its own isolation rule.
+//
+// The names cannot be inferred and cannot sensibly be defaulted on a router:
 // UCI section names cannot contain hyphens, so a netifd-created device can
 // never be called "wg-clients", and an xfrm interface is named by whoever
 // created it.
-func effectiveClientsIface(p Policy) string {
-	if p.ClientsInterface != "" {
-		return p.ClientsInterface
+func effectiveClientsIfaces(p Policy) []string {
+	if len(p.ClientsInterfaces) > 0 {
+		return p.ClientsInterfaces
 	}
-	return DefaultClientsIface
+	return []string{DefaultClientsIface}
 }
 
 // checkInvariants rejects a state whose halves disagree.

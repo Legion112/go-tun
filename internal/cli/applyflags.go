@@ -61,10 +61,10 @@ func registerApplyFlags(fs *flag.FlagSet) *applyFlags {
 				" needed for a port-forwarded server, whose replies would otherwise leave via the exit hop"+
 				" and reach the peer from an address it never dialled"),
 		clientsIface: fs.String("clients-iface", "",
-			"name of the inbound clients-facing device when gotun does not manage it (netifd's WireGuard"+
-				" interface, or the xfrm interface an IKEv2 CHILD_SA surfaces on). gotun holds no"+
-				" credential for it; it must also appear in -mark-iface or clients on it get no"+
-				" split routing at all"),
+			"inbound clients-facing devices gotun does not manage (comma-separated): netifd's"+
+				" WireGuard interface, the xfrm interface an IKEv2 CHILD_SA surfaces on, or both"+
+				" at once. gotun holds no credential for them; each must also appear in"+
+				" -mark-iface, or clients on it get no split routing at all"),
 		nonRoutable: fs.String("non-routable", "",
 			"extra destinations never to mark (comma-separated CIDRs); defaults to private, CGNAT, link-local, loopback and multicast space"),
 	}
@@ -100,7 +100,7 @@ func (f *applyFlags) options() (ApplyOptions, error) {
 		NonRoutableCSV:  *f.nonRoutable,
 		DirectSrcCSV:    *f.directSrc,
 		TunnelIface:     strings.TrimSpace(*f.tunnelIface),
-		ClientsIface:    strings.TrimSpace(*f.clientsIface),
+		ClientsIfaceCSV: *f.clientsIface,
 		DryRun:          truthy(*f.dryRun),
 	}, nil
 }
