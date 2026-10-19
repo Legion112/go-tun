@@ -30,7 +30,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	if iface == "" {
 		iface = DefaultTunnelIface
 	}
-	clientsIface := DefaultClientsIface
+	clientsIface := effectiveClientsIface(p)
 
 	// MandatoryNonRoutable is unioned in rather than replaced by the operator's
 	// list: an override that forgot IPv6 link-local and multicast would mark
@@ -81,8 +81,20 @@ func Compile(p Policy) (DesiredKernelState, error) {
 		},
 	}
 
+	// Two questions that used to be one. "Does gotun own the inbound device"
+	// decides whether it writes keys, brings the link up and routes AllowedIPs;
+	// "is there an inbound device at all" decides whether the home LAN needs
+	// isolating from it.
+	//
+	// They came apart as soon as the inbound device stopped being gotun's. On
+	// OpenWrt netifd owns the WireGuard interface and gotun deliberately holds
+	// no private key; an IKEv2 CHILD_SA surfaces on an xfrm interface that has
+	// no key to hold at all. Gating isolation on PrivateKey therefore meant the
+	// isolation silently did not exist on exactly the deployment that needs it
+	// most -- a phone arriving from the WAN -- while `nft list table inet gotun`
+	// on the live router showed one set and one chain and looked unremarkable.
 	inboundManaged := p.InboundWireGuard.PrivateKey != ""
-	if inboundManaged {
+	if inboundPresent(p) {
 		sets = append(sets, NftSetSpec{
 			Name:     HomeNetsSetName,
 			Family:   FamilyV4,
@@ -513,10 +525,45 @@ func validate(p Policy) error {
 		return fmt.Errorf("policy: -drop-ipv6 and -ipv6 on are mutually exclusive" +
 			" (one drops all IPv6, the other classifies it)")
 	}
-	if p.InboundWireGuard.PrivateKey != "" && len(p.LANs) == 0 {
-		return fmt.Errorf("policy: LANs required when InboundWireGuard is set (home isolation)")
+	if inboundPresent(p) {
+		if len(p.LANs) == 0 {
+			return fmt.Errorf("policy: LANs required when an inbound clients interface is set" +
+				" (home isolation has nothing to isolate without them)")
+		}
+		// An ingress guard that omits the inbound device gives the clients on
+		// it no split routing whatsoever, and nothing anywhere reports that:
+		// their traffic is simply never marked, so it follows main out the
+		// uplink while every other client is tunnelled. Refusing is the only
+		// way this becomes visible.
+		//
+		// An empty MarkIIfNames classifies every interface, so it covers the
+		// inbound device by construction and is not an error here. It has its
+		// own warning at the CLI boundary.
+		if ci := effectiveClientsIface(p); len(p.MarkIIfNames) > 0 && !slices.Contains(p.MarkIIfNames, ci) {
+			return fmt.Errorf("policy: clients interface %q is not in MarkIIfNames %v, so traffic"+
+				" arriving on it would never be classified", ci, p.MarkIIfNames)
+		}
 	}
 	return nil
+}
+
+// inboundPresent reports whether an inbound clients-facing device exists at
+// all, whether or not gotun manages it.
+func inboundPresent(p Policy) bool {
+	return p.InboundWireGuard.PrivateKey != "" || p.ClientsInterface != ""
+}
+
+// effectiveClientsIface is the inbound device's name.
+//
+// The name cannot be inferred and cannot sensibly be defaulted on a router:
+// UCI section names cannot contain hyphens, so a netifd-created device can
+// never be called "wg-clients", and an xfrm interface is named by whoever
+// created it.
+func effectiveClientsIface(p Policy) string {
+	if p.ClientsInterface != "" {
+		return p.ClientsInterface
+	}
+	return DefaultClientsIface
 }
 
 // checkInvariants rejects a state whose halves disagree.
