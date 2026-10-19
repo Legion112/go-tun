@@ -163,6 +163,106 @@ gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
 
 `-lan` feeds both mark exclusions and the `home_nets` isolation set.
 
+### An inbound interface gotun does not own (`-clients-iface`)
+
+`-wg-clients-config` makes gotun hold the inbound private key and manage the
+device. On a router that is the wrong shape twice over: netifd owns the
+WireGuard interface and gotun deliberately holds no key, and the device may not
+be WireGuard at all -- an IKEv2 CHILD_SA surfaces on an xfrm interface, which
+has no key to hold.
+
+```bash
+gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
+  -lan 192.168.8.0/24 \
+  -clients-iface ipsec0 \
+  -mark-iface br-lan,ipsec0 \
+  -tunnel-iface xray0
+```
+
+The name cannot be defaulted: UCI section names cannot contain hyphens, so a
+netifd-created device can never be called `wg-clients`.
+
+Two refusals come with it, both because the alternative is silent:
+
+- **LANs are required.** `home_nets` isolation with nothing to isolate is a rule
+  that drops nothing.
+- **The interface must appear in `-mark-iface`** whenever that list is non-empty.
+  A clients interface missing from the ingress guard means traffic arriving on it
+  is never marked, so those clients follow `main` out the ISP while every other
+  client is tunnelled — and nothing anywhere reports it. This is not
+  hypothetical: the live router ran `-mark-iface br-lan` with `br-guest` and
+  `br-iot` up.
+
+Isolation is a **forward** hook rule, so it covers inbound peer → LAN host and
+nothing else. Traffic addressed to the router's own LAN address goes to input and
+is untouched, which is both the gap and the reason the gap exists: the same hole
+keeps the peer's DNS working, and DNS to the gateway is load-bearing for GeoDNS.
+Restricting the router's own services belongs to the firewall zone
+(`input REJECT` plus Allow-DNS). gotun classifies; it does not firewall the box
+it runs on.
+
+## A phone on IKEv2/IPsec (`gotun ikev2`)
+
+An iPhone using Apple's in-kernel IKEv2 client gets two things a WireGuard
+NetworkExtension cannot: NAT-keepalive hardware offload, so the application
+processor does not wake to send keepalives while the phone sleeps, and coarse
+dead-peer detection. That is where phone VPN battery actually goes.
+
+```bash
+gotun ikev2 -server vpn.example.net \
+  -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
+  -probe-url http://vpn.example.net:8443/alive \
+  -home-ssid HomeWiFi -client-id iphone
+```
+
+It writes a swanctl configuration and a `.mobileconfig`, from one description so
+the two cannot disagree about the gateway's identity or the resolver it pushes.
+
+Three things are worth knowing before reading the output.
+
+**The phone's routing table is the gateway's decision.** Apple's IKEv2 payload
+has no excluded-routes key and iOS ignores split-exclude attributes, so
+"everything except private space" has to be sent as the **positive traffic
+selectors that remain** — 52 IPv4 prefixes plus `2000::/3`. They are prefixes
+rather than the four equivalent ranges because charon's own client rounds each
+received range up to its smallest covering prefix, turning a range that spans
+10/8 into a `0.0.0.0/1` route that swallows the phone's own LAN. Measured; see
+[docs/ikev2-phone.md](docs/ikev2-phone.md).
+
+**Route-based, not policy-based.** The gateway terminates the CHILD_SA on an
+**xfrm interface**, so decrypted packets surface on a named device and
+`-mark-iface` and `home_nets` isolation apply unchanged. Policy-based IPsec
+surfaces them on the physical WAN device, where neither has anything to attach
+to. Address that interface with a `/24` inside the VIP subnet: charon installs
+no route for an xfrm interface, so a `/32` leaves the pool off-link and every
+reply to the phone fails source lookup while the SA still reads `ESTABLISHED`.
+
+**Fail-open is three layers and only the third is gotun's.** The profile is
+never an Always-On payload (that one *is* a kill switch); its On-Demand rules
+connect only while `URLStringProbe` returns 200 and end in a catch-all
+`Disconnect`; and `-fail-mode open` withdraws the route as it always did. Serve
+the probe from `gotun watch -health-listen` so it reflects the exit hop —
+otherwise the phone connects into a tunnel whose exit is dead and gotun's
+fail-open then sends it out the local uplink, silently.
+
+Note the cost: nothing re-evaluates an On-Demand rule while the SA is alive, so
+a tunnel that dies mid-session is noticed by DPD and traffic is held until then.
+`-dpd High` is one minute and the most radio wakeups; `Medium` is ten minutes.
+Availability and battery are the same dial.
+
+### The probe endpoint
+
+```bash
+gotun watch ... -health-listen 0.0.0.0:8443
+```
+
+`GET /alive` answers 200 while the tunnel carries traffic and 503 once the
+watchdog has withdrawn the route. The status follows the **acted-upon belief**
+rather than the latest verdict: a single failed probe does not withdraw the
+route, and an inconclusive check is inert, so the phone never goes direct out of
+uncertainty. The body says only `up` or `down`, because the endpoint is
+published through every NAT in front of the gateway and a stranger can read it.
+
 ## Deployment topology (high fidelity)
 
 Integration hierarchy:
@@ -171,6 +271,9 @@ Integration hierarchy:
 topology_test.go       → kernel/policy correctness (fast)
 lan_deploy_test.go     → home-router port-forward + LAN isolation
 deploy_topo_test.go    → RU vs external Internet, egress identity
+phone_deploy_test.go   → a phone tunnelling in over WireGuard
+ikev2_phone_test.go    → the same over IKEv2/IPsec: narrowed selectors,
+                         MOBIKE roaming, and the generated config in charon
 ```
 
 `TestDeployTopo_EgressIdentity` places the Pi **only** on home LAN. A remote client on RU Internet reaches the Pi via home-router DNAT. The physical RU↔external uplink remains; the test proves path choice by **source identity** at destinations (`labhttp` `GET /peer` from `RemoteAddr`):
@@ -201,6 +304,11 @@ gotun amnezia -mmdb data/geo/GeoIP2-City.mmdb -out amnezia-sites.json -format of
 gotun amnezia -out amnezia-sites.json -format ios   # CSV download; CIDR in ip (iOS import workaround)
 gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg-exit.conf -tunnel-up true
 gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
+gotun apply ... -clients-iface ipsec0 -mark-iface br-lan,ipsec0   # inbound iface gotun does not own
+gotun ikev2 -server vpn.example.net -vip-subnet 10.231.17.0/24 \
+  -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
+  -probe-url http://vpn.example.net:8443/alive        # swanctl config + iOS .mobileconfig
+gotun watch ... -health-listen 0.0.0.0:8443           # GET /alive for the phone's on-demand probe
 gotun clear
 ```
 
