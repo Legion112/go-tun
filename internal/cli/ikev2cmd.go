@@ -13,86 +13,114 @@ import (
 )
 
 func runIKEv2(args []string) error {
+	if len(args) > 0 && args[0] == "user" {
+		return runIKEv2User(args[1:])
+	}
 	fs := flag.NewFlagSet("ikev2", flag.ContinueOnError)
-	server := fs.String("server", "",
-		"the address the phone dials: a DDNS name or public IP, reachable from outside")
-	gatewayID := fs.String("gateway-id", "",
-		"the gateway's IKE identity; must be a subjectAltName on its certificate."+
-			" Empty means -server")
-	clientID := fs.String("client-id", "phone", "the phone's identity, and its EAP username")
-	vipSubnet := fs.String("vip-subnet", "", "tunnel-side subnet (CIDR); pick an unusual one,"+
-		" because it is routed into the tunnel and would shadow a network the phone sits on")
-	vipGateway := fs.String("vip-gateway", "",
-		"the gateway's tunnel-side address, where gotun-dns listens; pushed to the phone as DNS")
-	pool := fs.String("pool", "", "range virtual IPs are handed out from (CIDR, inside -vip-subnet)")
-	nonRoutable := fs.String("non-routable", "",
-		"space the phone keeps on-link (comma-separated CIDRs); defaults to private, CGNAT,"+
-			" link-local, loopback and multicast")
-	families := fs.String("families", "v4,v6", "address families to emit selectors for: v4, v6 or v4,v6")
-	probeURL := fs.String("probe-url", "",
-		"URL the phone fetches over its physical interface to decide whether to connect."+
-			" Point it at `gotun watch -health-listen` on the gateway's PUBLIC address;"+
-			" without it the profile connects unconditionally and can sit in 'connecting'")
-	homeSSID := fs.String("home-ssid", "",
-		"Wi-Fi networks on which not to connect (comma-separated); the tunnel would otherwise"+
-			" hairpin out and back through the same uplink")
-	ifID := fs.String("if-id", ikev2.DefaultIfID,
-		"xfrm interface id tying the CHILD_SA to a netdev; must match the `ip link add type xfrm if_id`")
-	serverCert := fs.String("server-cert", "",
-		"gateway certificate filename under /etc/swanctl/x509")
-	dpd := fs.String("dpd", ikev2.DPDHigh,
-		"DeadPeerDetectionRate: None, Low (30m), Medium (10m) or High (1m)."+
-			" This is also the fail-open latency, so it trades battery against availability")
-	keepalive := fs.Int("keepalive", ikev2.DefaultKeepAliveInterval,
-		"NAT keepalive seconds (Apple's minimum is 20); offloaded to hardware, so it costs no wakeup")
-	name := fs.String("name", "gotun", "what the VPN entry is called on the phone")
-	identifier := fs.String("identifier", "", "reverse-DNS payload identifier prefix")
+	f := registerIKEv2Flags(fs)
 	outSwanctl := fs.String("out-swanctl", "swanctl-phone.conf", "output path for the gateway configuration")
 	outProfile := fs.String("out-profile", "phone.mobileconfig", "output path for the iOS profile")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	fams, err := prefixes.ParseFamilies(*families)
+	cfg, err := f.config()
 	if err != nil {
 		return err
 	}
+	return ExportIKEv2(cfg, *outSwanctl, *outProfile)
+}
+
+// ikev2Flags is the shared description of a gateway, used by both `ikev2` and
+// `ikev2 user add`. One registrar rather than two, because a -vip-subnet that
+// meant something different in each would orphan every user already issued.
+type ikev2Flags struct {
+	server, gatewayID, clientID *string
+	vipSubnet, vipGateway, pool *string
+	nonRoutable, families       *string
+	probeURL, homeSSID          *string
+	ifID, serverCert, dpd       *string
+	keepalive                   *int
+	name, identifier            *string
+}
+
+func registerIKEv2Flags(fs *flag.FlagSet) *ikev2Flags {
+	f := &ikev2Flags{}
+	f.server = fs.String("server", "",
+		"the address the phone dials: a DDNS name or public IP, reachable from outside")
+	f.gatewayID = fs.String("gateway-id", "",
+		"the gateway's IKE identity; must be a subjectAltName on its certificate."+
+			" Empty means -server")
+	f.clientID = fs.String("client-id", "phone", "the phone's identity, and its EAP username")
+	f.vipSubnet = fs.String("vip-subnet", "", "tunnel-side subnet (CIDR); pick an unusual one,"+
+		" because it is routed into the tunnel and would shadow a network the phone sits on")
+	f.vipGateway = fs.String("vip-gateway", "",
+		"the gateway's tunnel-side address, where gotun-dns listens; pushed to the phone as DNS")
+	f.pool = fs.String("pool", "", "range virtual IPs are handed out from (CIDR, inside -vip-subnet)")
+	f.nonRoutable = fs.String("non-routable", "",
+		"space the phone keeps on-link (comma-separated CIDRs); defaults to private, CGNAT,"+
+			" link-local, loopback and multicast")
+	f.families = fs.String("families", "v4,v6", "address families to emit selectors for: v4, v6 or v4,v6")
+	f.probeURL = fs.String("probe-url", "",
+		"URL the phone fetches over its physical interface to decide whether to connect."+
+			" Point it at `gotun watch -health-listen` on the gateway's PUBLIC address;"+
+			" without it the profile connects unconditionally and can sit in 'connecting'")
+	f.homeSSID = fs.String("home-ssid", "",
+		"Wi-Fi networks on which not to connect (comma-separated); the tunnel would otherwise"+
+			" hairpin out and back through the same uplink")
+	f.ifID = fs.String("if-id", ikev2.DefaultIfID,
+		"xfrm interface id tying the CHILD_SA to a netdev; must match the `ip link add type xfrm if_id`")
+	f.serverCert = fs.String("server-cert", "",
+		"gateway certificate filename under /etc/swanctl/x509")
+	f.dpd = fs.String("dpd", ikev2.DPDHigh,
+		"DeadPeerDetectionRate: None, Low (30m), Medium (10m) or High (1m)."+
+			" This is also the fail-open latency, so it trades battery against availability")
+	f.keepalive = fs.Int("keepalive", ikev2.DefaultKeepAliveInterval,
+		"NAT keepalive seconds (Apple's minimum is 20); offloaded to hardware, so it costs no wakeup")
+	f.name = fs.String("name", "gotun", "what the VPN entry is called on the phone")
+	f.identifier = fs.String("identifier", "", "reverse-DNS payload identifier prefix")
+	return f
+}
+
+func (f *ikev2Flags) config() (ikev2.Config, error) {
+	fams, err := prefixes.ParseFamilies(*f.families)
+	if err != nil {
+		return ikev2.Config{}, err
+	}
 
 	cfg := ikev2.Config{
-		Server:            strings.TrimSpace(*server),
-		GatewayID:         strings.TrimSpace(*gatewayID),
-		ClientID:          strings.TrimSpace(*clientID),
+		Server:            strings.TrimSpace(*f.server),
+		GatewayID:         strings.TrimSpace(*f.gatewayID),
+		ClientID:          strings.TrimSpace(*f.clientID),
 		Families:          fams,
-		IfID:              strings.TrimSpace(*ifID),
-		ServerCert:        strings.TrimSpace(*serverCert),
-		ProbeURL:          strings.TrimSpace(*probeURL),
-		HomeSSIDs:         splitCSV(*homeSSID),
-		DPDRate:           strings.TrimSpace(*dpd),
-		KeepAliveInterval: *keepalive,
-		ProfileName:       strings.TrimSpace(*name),
-		Identifier:        strings.TrimSpace(*identifier),
+		IfID:              strings.TrimSpace(*f.ifID),
+		ServerCert:        strings.TrimSpace(*f.serverCert),
+		ProbeURL:          strings.TrimSpace(*f.probeURL),
+		HomeSSIDs:         splitCSV(*f.homeSSID),
+		DPDRate:           strings.TrimSpace(*f.dpd),
+		KeepAliveInterval: *f.keepalive,
+		ProfileName:       strings.TrimSpace(*f.name),
+		Identifier:        strings.TrimSpace(*f.identifier),
 	}
 
-	if cfg.VIPSubnet, err = parsePrefixFlag("vip-subnet", *vipSubnet); err != nil {
-		return err
+	if cfg.VIPSubnet, err = parsePrefixFlag("vip-subnet", *f.vipSubnet); err != nil {
+		return ikev2.Config{}, err
 	}
-	if cfg.Pool, err = parsePrefixFlag("pool", *pool); err != nil {
-		return err
+	if cfg.Pool, err = parsePrefixFlag("pool", *f.pool); err != nil {
+		return ikev2.Config{}, err
 	}
-	if v := strings.TrimSpace(*vipGateway); v != "" {
+	if v := strings.TrimSpace(*f.vipGateway); v != "" {
 		if cfg.VIPGateway, err = netip.ParseAddr(v); err != nil {
-			return fmt.Errorf("-vip-gateway %q: %w", v, err)
+			return ikev2.Config{}, fmt.Errorf("-vip-gateway %q: %w", v, err)
 		}
 	}
-	if nr := strings.TrimSpace(*nonRoutable); nr != "" {
+	if nr := strings.TrimSpace(*f.nonRoutable); nr != "" {
 		if cfg.NonRoutable, err = parsePrefixCSV(nr); err != nil {
-			return err
+			return ikev2.Config{}, err
 		}
 	} else {
 		cfg.NonRoutable = policy.DefaultNonRoutable()
 	}
-
-	return ExportIKEv2(cfg, *outSwanctl, *outProfile)
+	return cfg, nil
 }
 
 func parsePrefixFlag(name, v string) (netip.Prefix, error) {
