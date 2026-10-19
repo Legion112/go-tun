@@ -28,12 +28,21 @@ func TestWatch_DeadTunnelFallsBackAndRecovers(t *testing.T) {
 			" -wg-config /tmp/wg-exit.conf -fail-mode open"+
 			" -probe-target 10.30.0.10:8080 -probe-interval 2s -probe-timeout 2s"+
 			" -fail-after 2 -recover-after 1 -cooldown 0"+
+			" -health-listen 127.0.0.1:18099"+
 			" > /tmp/watch.log 2>&1 &"))
 	t.Cleanup(func() { _, _ = tp.lab.Exec(context.Background(), "gotun", "killall", "gotun") })
 
 	waitFor(t, tp, "baseline: foreign reachable through the tunnel", func() bool {
 		out, _ := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id")
 		return strings.TrimSpace(out) == "FOREIGN"
+	})
+
+	// The probe endpoint has to track the route, because that is the whole
+	// point of it: a phone's On-Demand rule connects only while this answers
+	// 200, so an endpoint that merely proved a web server was running would
+	// invite the phone into a tunnel whose exit hop is dead.
+	waitFor(t, tp, "health endpoint reports the tunnel is carrying traffic", func() bool {
+		return aliveCode(t, tp) == "200"
 	})
 
 	// Up but dead: the interface stays up, the underlay is black-holed.
@@ -51,6 +60,10 @@ func TestWatch_DeadTunnelFallsBackAndRecovers(t *testing.T) {
 		return strings.TrimSpace(out) == "FOREIGN"
 	})
 
+	waitFor(t, tp, "health endpoint reports the withdrawal, so the phone goes direct", func() bool {
+		return aliveCode(t, tp) == "503"
+	})
+
 	// The interface must never have been forced down: that is what lets the
 	// transport re-establish itself.
 	link, err := tp.lab.Exec(ctx, "gotun", "ip", "link", "show", "dev", "wg-exit")
@@ -64,6 +77,20 @@ func TestWatch_DeadTunnelFallsBackAndRecovers(t *testing.T) {
 		rt, _ := tp.lab.Exec(ctx, "gotun", "ip", "route", "show", "table", "100")
 		return strings.Contains(rt, "wg-exit")
 	})
+	waitFor(t, tp, "health endpoint reports the tunnel is usable again", func() bool {
+		return aliveCode(t, tp) == "200"
+	})
+}
+
+// aliveCode reads the probe endpoint from inside the gateway container. It
+// listens on loopback there, so it stays off the lab networks -- the real one
+// is published through a port forward, which is the operator's decision rather
+// than something a test should model.
+func aliveCode(t *testing.T, tp *topo) string {
+	t.Helper()
+	out, _ := tp.lab.Exec(context.Background(), "gotun", "curl", "-s", "-o", "/dev/null",
+		"--max-time", "3", "-w", "%{http_code}", "http://127.0.0.1:18099/alive")
+	return strings.TrimSpace(out)
 }
 
 // waitFor polls until cond holds, so the test tracks the watchdog's own cadence

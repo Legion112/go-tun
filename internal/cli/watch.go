@@ -29,6 +29,12 @@ func runWatch(args []string) error {
 		"consecutive successful probes before the tunnel route is restored")
 	cooldown := fs.Duration("cooldown", tunnelwatch.DefaultCooldown,
 		"minimum gap between route transitions, bounding how fast the route can flap; 0 disables")
+	healthListen := fs.String("health-listen", "",
+		"serve GET /alive on this address, 200 while the tunnel carries traffic and 503 once the"+
+			" route has been withdrawn. It exists for a phone's IKEv2 On-Demand URLStringProbe:"+
+			" published through the NATs in front of the gateway, it turns a dead exit hop into a"+
+			" VPN icon that is visibly off instead of a silent fallback to the local uplink."+
+			" The body says only up or down, because strangers can read it")
 	bounceAfter := fs.Duration("bounce-after", 0,
 		"recreate the tunnel interface once it has been dead this long; 0 disables."+
 			" Leave it disabled whenever another daemon owns the interface (sing-box, netifd):"+
@@ -49,6 +55,7 @@ func runWatch(args []string) error {
 		RecoverAfter: *recoverAfter,
 		Cooldown:     *cooldown,
 		BounceAfter:  *bounceAfter,
+		HealthListen: strings.TrimSpace(*healthListen),
 	})
 }
 
@@ -62,6 +69,9 @@ type WatchOptions struct {
 	RecoverAfter int
 	Cooldown     time.Duration
 	BounceAfter  time.Duration
+	// HealthListen is the address the /alive probe endpoint binds to. Empty
+	// disables it.
+	HealthListen string
 }
 
 // Watch applies the policy once and then keeps table 100 honest about whether
@@ -108,5 +118,14 @@ func Watch(o WatchOptions) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if o.HealthListen != "" {
+		// Started after the watcher exists so the handler never sees a nil
+		// snapshot, and in a goroutine because a bind failure must not stop the
+		// loop: losing the thing that reports on the tunnel is better than
+		// losing the tunnel.
+		go tunnelwatch.ServeAlive(ctx, o.HealthListen, w.Snapshot, lg.Printf)
+	}
+
 	return w.Run(ctx)
 }

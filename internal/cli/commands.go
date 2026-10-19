@@ -85,6 +85,12 @@ type ApplyOptions struct {
 	DirectSrcCSV string
 	// TunnelIface overrides the routed interface name. Empty keeps the default.
 	TunnelIface string
+	// ClientsIface names the inbound clients-facing device gotun does not
+	// manage. Separate from WGClientsConfig because the device may not be
+	// WireGuard at all -- an IKEv2 CHILD_SA surfaces on an xfrm interface --
+	// and because on OpenWrt netifd owns it and gotun deliberately holds no
+	// private key, so there is no config to infer a name from.
+	ClientsIface string
 	// DryRun reads real state but prints every write instead of applying it.
 	DryRun bool
 }
@@ -225,6 +231,9 @@ func Apply(o ApplyOptions) error {
 
 	if o.TunnelIface != "" {
 		p.TunnelInterface = o.TunnelIface
+	}
+	if o.ClientsIface != "" {
+		p.ClientsInterface = o.ClientsIface
 	}
 
 	if nr := strings.TrimSpace(o.NonRoutableCSV); nr != "" {

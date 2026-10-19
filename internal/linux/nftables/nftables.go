@@ -720,10 +720,12 @@ func findMetaMatchesInExpr(exprs []json.RawMessage, metaKey string) []string {
 				continue
 			}
 			if mraw, ok := obj["match"]; ok {
-				if name, ok := metaNameFromMatch(mraw, metaKey); ok {
-					if _, dup := seen[name]; !dup {
-						seen[name] = struct{}{}
-						out = append(out, name)
+				if names, ok := metaNamesFromMatch(mraw, metaKey); ok {
+					for _, name := range names {
+						if _, dup := seen[name]; !dup {
+							seen[name] = struct{}{}
+							out = append(out, name)
+						}
 					}
 				}
 			}
@@ -772,13 +774,32 @@ func hasNATStmtInExpr(exprs []json.RawMessage) bool {
 	return found
 }
 
-func metaNameFromMatch(mraw json.RawMessage, metaKey string) (string, bool) {
+// metaNamesFromMatch returns the name(s) a meta <metaKey> match compares
+// against.
+//
+// Two shapes have to be handled and which one appears is not ours to choose.
+// The renderer always emits an anonymous set -- `iifname != { "eth0" }` -- but
+// nft normalizes a single-element set back to a bare string on readback and
+// keeps the set form from two elements up. Reading only the bare string meant a
+// gateway classifying one interface round-tripped cleanly while the same code
+// on a gateway classifying two found no names at all: the ingress guard never
+// matched the spec, so the whole table was deleted and rebuilt on every apply,
+// resetting the counters live verification reads.
+//
+// Two interfaces is not a corner. It is a LAN bridge plus a phone's tunnel
+// device, which is exactly what -clients-iface exists for, and it is what the
+// deploy notes already ask for the day a guest or IoT bridge comes up.
+//
+// The text parser handles the braced list already, so this was the JSON path
+// alone -- the same "two readback paths, opposite blind spots" shape as the ip6
+// daddr bug, in the other direction.
+func metaNamesFromMatch(mraw json.RawMessage, metaKey string) ([]string, bool) {
 	var m struct {
 		Left  json.RawMessage `json:"left"`
 		Right json.RawMessage `json:"right"`
 	}
 	if err := json.Unmarshal(mraw, &m); err != nil {
-		return "", false
+		return nil, false
 	}
 	var metaWrap struct {
 		Meta struct {
@@ -786,13 +807,19 @@ func metaNameFromMatch(mraw json.RawMessage, metaKey string) (string, bool) {
 		} `json:"meta"`
 	}
 	if json.Unmarshal(m.Left, &metaWrap) != nil || metaWrap.Meta.Key != metaKey {
-		return "", false
+		return nil, false
 	}
 	var s string
 	if json.Unmarshal(m.Right, &s) == nil && s != "" {
-		return s, true
+		return []string{s}, true
 	}
-	return "", false
+	var setWrap struct {
+		Set []string `json:"set"`
+	}
+	if json.Unmarshal(m.Right, &setWrap) == nil && len(setWrap.Set) > 0 {
+		return setWrap.Set, true
+	}
+	return nil, false
 }
 
 func findSetNamesInExpr(exprs []json.RawMessage) []string {

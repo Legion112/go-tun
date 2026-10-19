@@ -34,8 +34,13 @@ func dualStackSpec(t *testing.T) policy.NftSpec {
 			netip.MustParsePrefix("10.10.0.0/24"),
 			netip.MustParsePrefix("fd00:10::/64"),
 		},
-		LANIfaces:         []string{"eth0"},
-		MarkIIfNames:      []string{"eth0"},
+		LANIfaces: []string{"eth0"},
+		// The clients interface belongs in the ingress guard alongside the LAN
+		// bridge. This fixture declares a managed inbound interface, and an
+		// ingress guard that omits it would mean the inbound peers are never
+		// classified -- which Compile now refuses, so naming it here is what
+		// makes this fixture a coherent policy rather than a rendering prop.
+		MarkIIfNames:      []string{"eth0", policy.DefaultClientsIface},
 		FailMode:          policy.FailClosed,
 		TunnelUp:          false,
 		DirectSNAT:        true,
