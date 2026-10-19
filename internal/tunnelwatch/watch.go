@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/legion/go-tun/internal/linux"
@@ -75,6 +76,11 @@ type Watcher struct {
 	log   *log.Logger
 	now   func() time.Time
 
+	// snap is the loop's latest conclusion, published for readers in other
+	// goroutines. An atomic rather than a mutex because there is exactly one
+	// writer and the readers only ever want the newest value.
+	snap atomic.Pointer[Snapshot]
+
 	tunnelUp        bool
 	consecutiveFail int
 	consecutiveOK   int
@@ -87,11 +93,48 @@ type Watcher struct {
 // matching the state the initial apply installs.
 func New(r linux.Runner, p Prober, apply Applier, cfg Config, lg *log.Logger) *Watcher {
 	cfg.withDefaults()
-	return &Watcher{
+	w := &Watcher{
 		cfg: cfg, r: r, p: p, apply: apply, log: lg,
 		now:      time.Now,
 		tunnelUp: true,
 	}
+	// Published before the first probe, so a reader arriving in the gap sees
+	// the same belief the initial apply installed rather than a zero value --
+	// which would read as "tunnel down" and, for the phone's on-demand probe,
+	// would send it direct for one probe interval on every restart.
+	w.publish(Health{Verdict: Unknown, Reason: "no probe yet"})
+	return w
+}
+
+// Snapshot is the loop's latest conclusion, safe to read from another
+// goroutine.
+type Snapshot struct {
+	// TunnelUp is the belief the loop has acted on, which is what table 100
+	// currently reflects.
+	TunnelUp bool
+	// Verdict and Reason are the most recent check. They are reported
+	// separately from TunnelUp because the two deliberately disagree for a
+	// while: a single failure does not withdraw the route.
+	Verdict Verdict
+	Reason  string
+	At      time.Time
+}
+
+// Snapshot returns the latest published conclusion.
+func (w *Watcher) Snapshot() Snapshot {
+	if s := w.snap.Load(); s != nil {
+		return *s
+	}
+	return Snapshot{TunnelUp: true, Verdict: Unknown, Reason: "no probe yet"}
+}
+
+func (w *Watcher) publish(h Health) {
+	w.snap.Store(&Snapshot{
+		TunnelUp: w.tunnelUp,
+		Verdict:  h.Verdict,
+		Reason:   h.Reason,
+		At:       w.now(),
+	})
 }
 
 // TunnelUp reports the loop's current belief, for tests and status output.
@@ -101,6 +144,9 @@ func (w *Watcher) TunnelUp() bool { return w.tunnelUp }
 // machine directly instead of waiting on a ticker.
 func (w *Watcher) Tick(ctx context.Context) {
 	h := Check(ctx, w.r, w.p, CheckConfig{Iface: w.cfg.Iface, Target: w.cfg.Target, Timeout: w.cfg.Timeout})
+	// Published on the way out rather than here, so the snapshot carries the
+	// belief after this tick acted rather than the one it is about to change.
+	defer func() { w.publish(h) }()
 
 	switch h.Verdict {
 	case Unknown:
