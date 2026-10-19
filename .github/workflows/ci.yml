@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A push that lands while an earlier run is still going makes that run's result
+# meaningless, so cancel it rather than paying for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests, vet and gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # From go.mod, so the toolchain cannot drift from what the module
+          # declares. This project needs 1.26 for the stdlib it uses.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l internal cmd test)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d internal cmd test
+            exit 1
+          fi
+
+      # Both invocations, because the default one does not vet the
+      # integration-tagged files and a good deal of the lab code lives there.
+      - name: vet
+        run: make vet
+
+      # The MMDB-dependent tests skip without data/geo/*.mmdb, which is
+      # licensed MaxMind data and deliberately not in the repository.
+      - name: unit tests
+        run: go test -count=1 ./...
+
+  integration:
+    name: docker labs
+    runs-on: ubuntu-latest
+    # Two charon daemons, several WireGuard tunnels and ~30 disposable Docker
+    # networks; the suite itself runs in about four minutes.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The IKEv2 labs create xfrm interfaces, which needs this module. It is
+      # a hard requirement rather than best-effort on purpose: without it those
+      # tests call t.Skip, and a silently skipped lab is worse than a red
+      # build, because the coverage disappears without anybody noticing.
+      - name: xfrm interface support
+        run: |
+          sudo modprobe xfrm_interface
+          lsmod | grep -q xfrm_interface || { echo "::error::xfrm_interface did not load"; exit 1; }
+
+      - name: build the lab image
+        run: make docker-build
+
+      # The real-nft round trips live outside the path test-integration walks,
+      # so they get their own step.
+      - name: nftables round trips
+        run: make test-nft-real
+
+      # Run once, verbosely, and judge the same output twice. Nothing in a Go
+      # exit code distinguishes "passed" from "skipped itself", and the whole
+      # point of these tests is the ones that need a kernel feature or a
+      # daemon -- which are exactly the ones that skip. A silently skipped lab
+      # is worse than a red build, because the coverage disappears without
+      # anybody noticing.
+      - name: integration labs
+        run: |
+          set -o pipefail
+          GOTUN_INTEGRATION=1 go test -tags=integration -count=1 -timeout 25m -v \
+            ./test/integration/... 2>&1 | tee /tmp/labs.log
+      - name: no lab silently skipped
+        if: always()
+        run: |
+          if grep -q -- '--- SKIP' /tmp/labs.log; then
+            echo "::error::a lab skipped itself instead of running:"
+            grep -B1 -- '--- SKIP' /tmp/labs.log
+            exit 1
+          fi
+          echo "labs that ran:"
+          grep -c -- '--- PASS' /tmp/labs.log
