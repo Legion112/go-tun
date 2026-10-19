@@ -437,12 +437,35 @@ why `user revoke` terminates rather than trusting the session to be gone.
 entries offered first. It works; MODP-2048 is a slow DH on a router CPU, and
 narrowing the gateway proposals or pinning the profile's crypto is open.
 
-**The phone does not use the pushed resolver.** charon sends it --
-`CPRP(ADDR DNS)` is in the log -- and the count of DNS packets arriving at it is
-zero. iOS is resolving over encrypted DNS of its own. That traffic goes through
-the tunnel, so nothing leaks, but `.ru` names miss the GeoDNS treatment
-`gotun-dns` exists for. Unsolved, and not obviously solvable from the gateway
-short of blocking DoH, which is a bigger decision than it sounds.
+**A pushed resolver is not a used resolver.** charon sent it --
+`CPRP(ADDR DNS)` was in the log on every connect -- and zero queries arrived.
+The reason is structural rather than anything iOS does on its own: a split
+tunnel is not the network's default route, so iOS treats the tunnel's DNS
+servers as **supplemental**, consulted only for the domains named in
+`SupplementalMatchDomains`. With no such list, nothing ever matches.
+
+The fix is a `DNS` dictionary in the profile with the single empty string as a
+match domain, which is the documented way to say "every domain": it becomes the
+default domain and all queries go to the tunnel's resolver first. `-dns-match`
+controls it, defaulting to `all`, because a resolver that is pushed and never
+used is worse than no resolver -- it reads as working.
+
+**`DNS` is a sibling of `IKEv2`, not a key inside it.** Apple's schema puts it
+at the payload level because it applies to every VPN type. Nested in the
+`IKEv2` dictionary it is an unknown key, which iOS ignores in silence: the
+profile installs cleanly, looks right, and changes nothing. That shipped once
+here, and the test that was supposed to catch it only checked that the keys
+existed. It now compares the indentation of `<key>DNS</key>` against
+`<key>IKEv2</key>`, because placement was the whole bug.
+
+Measured after the fix: 109 DNS packets from the phone to the tunnel-side
+address, every forwarded query reaching `gotun-dns` and none falling through to
+dnsmasq's fallback resolver.
+
+What this does not reach is an application carrying its own DoH.
+`SupplementalMatchDomains` steers the system resolver; a browser with its own
+encrypted DNS still bypasses it. That traffic stays inside the tunnel, so
+nothing leaks -- it simply misses the GeoDNS treatment.
 
 **The health endpoint could not bind `0.0.0.0:8443`** because uhttpd owns
 `127.0.0.1:8443` there. It logged the failure and the watchdog carried on, which

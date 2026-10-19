@@ -278,11 +278,17 @@ already comes from the classifier anyway.
 - `uhttpd` owns `127.0.0.1:8443` here, so the health endpoint binds the WAN
   address instead. It logs the bind failure and carries on rather than taking
   the watchdog down with it.
-- **The phone does not use the pushed resolver.** charon sends it
-  (`CPRP(ADDR DNS)` in the log) and the count of DNS packets to it is zero, so
-  iOS is resolving over encrypted DNS of its own. That traffic goes through the
-  tunnel, so nothing leaks -- but `.ru` names miss the GeoDNS treatment
-  `gotun-dns` exists for. Unsolved.
+- **A pushed resolver is not a used resolver.** A split tunnel is not the
+  default route, so iOS treats the tunnel's DNS servers as supplemental and
+  consults them only for domains the profile names. `gotun ikev2 -dns-match
+  all` emits the `DNS` dictionary that fixes it -- at the **payload** level,
+  beside `IKEv2` rather than inside it, since a key nested in the wrong place
+  is ignored in silence. Measured after: every query from the phone arrives,
+  and every forwarded one reaches `gotun-dns` rather than dnsmasq's fallback.
+- The existing dnsmasq `server=` list has `127.0.0.2` first and a plain RU
+  resolver second, and dnsmasq is free to use either. It happened to use only
+  the first throughout; `strict-order` would make that a guarantee rather than
+  an observation.
 
 ## Rollback
 

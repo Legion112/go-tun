@@ -245,6 +245,15 @@ same profile is trusted for it — no separate install, no toggle in Certificate
 Trust Settings. Without it the phone has nothing to validate the server against
 and fails with a generic connect error that says nothing about trust.
 
+**`-dns-match`** decides which queries reach the gateway's resolver, and it is
+the difference between that resolver being used and being configured and
+ignored. A split tunnel is not the network's default route, so iOS treats the
+tunnel's DNS servers as *supplemental* — consulted only for the domains the
+profile names. With none named, nothing matches and not one query arrives.
+`all` (the default) emits the single empty string, which is the documented way
+to say "every domain"; a comma-separated list narrows it; `none` omits the
+settings and says so.
+
 **`-on-demand false`** ships a profile connected by hand. That is what a first
 test against a gateway which is not reachable from everywhere wants: on-demand
 with no probe makes the phone try on every network and hold traffic wherever it
