@@ -271,6 +271,48 @@ a tunnel that dies mid-session is noticed by DPD and traffic is held until then.
 `-dpd High` is one minute and the most radio wakeups; `Medium` is ten minutes.
 Availability and battery are the same dial.
 
+### One credential per person (`gotun ikev2 user`)
+
+```bash
+gotun ikev2 user add alice -server vpn.example.net \
+  -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
+  -probe-url http://vpn.example.net:8443/alive
+
+gotun ikev2 user list
+gotun ikev2 user revoke alice
+gotun ikev2 user purge alice     # releases the held address
+```
+
+`add` writes a 0600 snippet into `/etc/swanctl/conf.d/`, where swanctl's own
+`include conf.d/*.conf` picks it up, plus that person's `.mobileconfig`. The
+password is **generated, printed once, and stored nowhere else** — not in the
+profile, which gets AirDropped to a phone and then sits in Downloads. iOS keeps
+it in the keychain after the first connect, so On-Demand needs no prompt
+afterwards.
+
+**One file per user, carrying a whole connection.** That is what buys a fixed
+address: strongSwan's pools are per-connection and not identity-aware, so one
+shared connection with several pools hands out whichever address is free rather
+than the person's own. A connection per user with a single-address pool pins it
+— and names the SA after the user, so `swanctl --list-sas` attributes traffic
+for free. Revocation is then a delete rather than an edit: nothing has to
+rewrite a configuration that is currently authenticating other people.
+
+**Revoking takes two steps, and the second is the one that matters.** Removing
+the credential and reloading stops *new* sessions. It does nothing to an
+established one: the connection does not reauthenticate, so the IKE_SA rekeys
+without ever consulting the secret again and the tunnel survives indefinitely.
+Measured, and pinned in `TestIKEv2Users_NamedCredentialsAreFixedAndRevocable`.
+`user revoke` therefore reloads **and** terminates, and fails loudly if it
+cannot — a revocation that reported success while the tunnel stayed up is the
+worst outcome available here. `-apply false` skips both and says so.
+
+**A revoked address is held back, not reused.** Handing it to the next person
+would make every log entry from before the revocation attribute the old user's
+traffic to the new one, which is the one thing a fixed address was for. The
+tombstone carries no credential and does not match swanctl's include glob;
+`user purge` releases it as a deliberate step.
+
 ### The probe endpoint
 
 ```bash
@@ -296,6 +338,7 @@ phone_deploy_test.go   → a phone tunnelling in over WireGuard
 ikev2_phone_test.go    → the same over IKEv2/IPsec: narrowed selectors,
                          MOBIKE roaming, and the generated config in charon
 multitransport_test.go → IKEv2 + WireGuard + the home LAN, all at once
+ikev2_users_test.go    → named credentials, fixed addresses, revocation
 ```
 
 `TestDeployTopo_EgressIdentity` places the Pi **only** on home LAN. A remote client on RU Internet reaches the Pi via home-router DNAT. The physical RU↔external uplink remains; the test proves path choice by **source identity** at destinations (`labhttp` `GET /peer` from `RemoteAddr`):
@@ -330,6 +373,9 @@ gotun apply ... -clients-iface ipsec0,wgphone -mark-iface br-lan,ipsec0,wgphone 
 gotun ikev2 -server vpn.example.net -vip-subnet 10.231.17.0/24 \
   -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
   -probe-url http://vpn.example.net:8443/alive        # swanctl config + iOS .mobileconfig
+gotun ikev2 user add alice ...                        # one named credential, fixed address
+gotun ikev2 user list
+gotun ikev2 user revoke alice                         # reloads AND terminates the live session
 gotun watch ... -health-listen 0.0.0.0:8443           # GET /alive for the phone's on-demand probe
 gotun clear
 ```
