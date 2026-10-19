@@ -14,6 +14,8 @@
 package ikev2
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/netip"
@@ -91,6 +93,19 @@ type Config struct {
 	// GatewayID must match that SAN, or iOS rejects the server it just
 	// authenticated.
 	ServerCert string
+	// CAPEM is the PEM-encoded certificate authority that signed ServerCert,
+	// embedded in the profile as a root certificate payload.
+	//
+	// Without it a self-signed gateway is simply rejected: the phone has
+	// nothing to validate the server against, and the failure is a generic
+	// connect error with no indication that trust is the problem. A root
+	// delivered inside the same profile is trusted for that profile, so this
+	// is the whole of the trust setup -- no separate install, no manual toggle
+	// in Certificate Trust Settings.
+	//
+	// Empty is legitimate only when ServerCert is signed by a publicly trusted
+	// CA; Validate says so loudly.
+	CAPEM []byte
 
 	// ProbeURL is fetched by the phone over its physical interface to decide
 	// whether to bring the tunnel up at all. It must be served by something
@@ -101,6 +116,15 @@ type Config struct {
 	// HomeSSIDs are networks on which the phone should not connect, because
 	// the tunnel would hairpin back through the same uplink it exits from.
 	HomeSSIDs []string
+	// OnDemandDisabled ships a profile the person connects by hand.
+	//
+	// It exists for a first test against a gateway that is not reachable from
+	// everywhere. On-Demand with an unconditional Connect rule and no probe
+	// makes the phone try on every network and hold traffic where it cannot
+	// reach the gateway, so handing somebody that profile breaks their phone's
+	// internet the moment they leave. A pointer rather than a bool so the zero
+	// value stays "on demand enabled", which is what a deployed profile wants.
+	OnDemandDisabled bool
 
 	// DPDRate is one of the DPD* constants. Empty means DPDHigh.
 	DPDRate string
@@ -322,7 +346,40 @@ func (c Config) Validate() error {
 	if err := validateProbeURL(c.ProbeURL); err != nil {
 		return err
 	}
+	if len(c.CAPEM) > 0 {
+		if _, err := caDER(c.CAPEM); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// caDER extracts the certificate body a profile payload needs.
+//
+// Apple's certificate payloads carry DER, not PEM. Handing them a PEM block
+// produces a profile that installs and then fails to validate anything, which
+// looks like a trust problem with the CA rather than an encoding mistake.
+func caDER(pemBytes []byte) ([]byte, error) {
+	rest := pemBytes
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return nil, fmt.Errorf("ikev2: no CERTIFICATE block in the CA file")
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("ikev2: parsing the CA certificate: %w", err)
+		}
+		if !cert.IsCA {
+			return nil, fmt.Errorf("ikev2: %q is not a CA certificate (no CA basic constraint),"+
+				" so iOS will not use it to validate the gateway", cert.Subject.CommonName)
+		}
+		return block.Bytes, nil
+	}
 }
 
 // validateProbeURL rejects a probe the phone cannot use as a discriminator.

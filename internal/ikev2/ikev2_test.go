@@ -1,9 +1,18 @@
 package ikev2_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
+	"math/big"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/legion/go-tun/internal/ikev2"
 	"github.com/legion/go-tun/internal/policy"
@@ -391,4 +400,145 @@ func uuidOf(t *testing.T, profile string) string {
 	start := strings.Index(rest, "<string>") + len("<string>")
 	end := strings.Index(rest, "</string>")
 	return rest[start:end]
+}
+
+// testCA mints a throwaway CA and a leaf, so the trust tests run on real
+// certificates rather than on bytes that happen to parse.
+func testCA(t *testing.T) (caPEM, leafPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "gotun-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "vpn.example.net"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"vpn.example.net"},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return caPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+}
+
+// A self-signed gateway is rejected by a phone that has nothing to validate it
+// against, and the failure is a generic connect error that says nothing about
+// trust. A root delivered inside the same profile is trusted for that profile,
+// so this payload is the whole of the trust setup.
+func TestProfile_EmbedsTheCAAsATrustedRoot(t *testing.T) {
+	caPEM, _ := testCA(t)
+	c := testConfig()
+	c.CAPEM = caPEM
+
+	b, err := ikev2.EncodeProfile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "com.apple.security.root") {
+		t.Fatalf("no root certificate payload:\n%s", got)
+	}
+	// The VPN payload must still be there: a profile that installs only a CA
+	// looks like it worked and configures nothing.
+	if !strings.Contains(got, "com.apple.vpn.managed") {
+		t.Error("the VPN payload went missing")
+	}
+
+	// Apple's certificate payloads carry DER, not PEM. Handing them PEM
+	// produces a profile that installs and then validates nothing, which reads
+	// as a problem with the CA rather than with the encoding.
+	start := strings.Index(got, "<data>")
+	end := strings.Index(got, "</data>")
+	if start < 0 || end < 0 {
+		t.Fatal("no <data> element carrying the certificate")
+	}
+	raw := strings.Join(strings.Fields(got[start+len("<data>"):end]), "")
+	der, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("the payload is not base64: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("the payload is not DER: %v", err)
+	}
+	if cert.Subject.CommonName != "gotun-test-ca" {
+		t.Errorf("embedded the wrong certificate: %s", cert.Subject.CommonName)
+	}
+	if strings.Contains(got, "BEGIN CERTIFICATE") {
+		t.Error("the profile carries PEM, which iOS will not use")
+	}
+}
+
+// A leaf passed where a CA belongs would install, be trusted for nothing, and
+// leave the same generic connect error.
+func TestValidate_RejectsSomethingThatIsNotACA(t *testing.T) {
+	_, leafPEM := testCA(t)
+	c := testConfig()
+	c.CAPEM = leafPEM
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "not a CA") {
+		t.Errorf("the error should say why, got: %v", err)
+	}
+}
+
+func TestValidate_RejectsAnUnreadableCA(t *testing.T) {
+	for _, bad := range [][]byte{
+		[]byte("not pem at all"),
+		[]byte("-----BEGIN CERTIFICATE-----\nnotbase64\n-----END CERTIFICATE-----\n"),
+	} {
+		c := testConfig()
+		c.CAPEM = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}
+
+// A first test against a gateway that is not reachable from everywhere needs a
+// profile the person connects by hand. On-demand with an unconditional Connect
+// rule and no probe makes the phone try on every network and hold traffic
+// where it cannot reach the gateway, which breaks their internet the moment
+// they leave the house.
+func TestProfile_OnDemandCanBeShippedOff(t *testing.T) {
+	c := testConfig()
+	c.OnDemandDisabled = true
+	b, err := ikev2.EncodeProfile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "<key>OnDemandEnabled</key>\n\t\t\t<integer>0</integer>") {
+		t.Errorf("on-demand should be off:\n%s", got)
+	}
+	// Omitted rather than present-but-inert: a rule list that is not being
+	// evaluated is the kind of thing somebody later reads as the behaviour.
+	if strings.Contains(got, "OnDemandRules") {
+		t.Error("the rules should not be emitted when on-demand is off")
+	}
+	// ...and the tunnel itself must still be fully configured.
+	if !strings.Contains(got, "com.apple.vpn.managed") || !strings.Contains(got, "IKEv2") {
+		t.Error("the VPN payload went missing")
+	}
 }

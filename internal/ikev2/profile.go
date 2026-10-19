@@ -3,6 +3,7 @@ package ikev2
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"strings"
@@ -113,31 +114,61 @@ func EncodeProfile(c Config) ([]byte, error) {
 	p.num(4, "NATKeepAliveInterval", c.KeepAliveInterval)
 	p.closeDict(3)
 
-	p.num(3, "OnDemandEnabled", 1)
-	p.key(3, "OnDemandRules")
-	p.raw(3, "<array>")
-	for _, r := range onDemandRules(c) {
-		p.openDict(4)
-		p.str(5, "Action", r.action)
-		if r.interfaceType != "" {
-			p.str(5, "InterfaceTypeMatch", r.interfaceType)
-		}
-		if len(r.ssids) > 0 {
-			p.key(5, "SSIDMatch")
-			p.raw(5, "<array>")
-			for _, s := range r.ssids {
-				p.raw(6, "<string>"+escape(s)+"</string>")
+	// Connected by hand when on-demand is off, and the rules are omitted
+	// entirely rather than left present-but-inert: a rule list that is not
+	// being evaluated is the kind of thing somebody later reads as the
+	// behaviour and is wrong about.
+	if c.OnDemandDisabled {
+		p.num(3, "OnDemandEnabled", 0)
+	} else {
+		p.num(3, "OnDemandEnabled", 1)
+		p.key(3, "OnDemandRules")
+		p.raw(3, "<array>")
+		for _, r := range onDemandRules(c) {
+			p.openDict(4)
+			p.str(5, "Action", r.action)
+			if r.interfaceType != "" {
+				p.str(5, "InterfaceTypeMatch", r.interfaceType)
 			}
-			p.raw(5, "</array>")
+			if len(r.ssids) > 0 {
+				p.key(5, "SSIDMatch")
+				p.raw(5, "<array>")
+				for _, s := range r.ssids {
+					p.raw(6, "<string>"+escape(s)+"</string>")
+				}
+				p.raw(5, "</array>")
+			}
+			if r.urlProbe != "" {
+				p.str(5, "URLStringProbe", r.urlProbe)
+			}
+			p.closeDict(4)
 		}
-		if r.urlProbe != "" {
-			p.str(5, "URLStringProbe", r.urlProbe)
-		}
-		p.closeDict(4)
+		p.raw(3, "</array>")
 	}
-	p.raw(3, "</array>")
 
 	p.closeDict(2) // VPN payload
+
+	// The root that signed the gateway's certificate, delivered in the same
+	// profile so it is trusted for it. Without this a self-signed gateway is
+	// rejected with a generic connect error that says nothing about trust.
+	if len(c.CAPEM) > 0 {
+		der, err := caDER(c.CAPEM)
+		if err != nil {
+			return nil, err
+		}
+		caID := profileID + ".ca"
+		p.openDict(2)
+		p.str(3, "PayloadType", "com.apple.security.root")
+		p.num(3, "PayloadVersion", 1)
+		p.str(3, "PayloadIdentifier", caID)
+		p.str(3, "PayloadUUID", deterministicUUID(caID))
+		p.str(3, "PayloadDisplayName", c.ProfileName+" CA")
+		p.str(3, "PayloadCertificateFileName", "gotun-ca.crt")
+		// Apple's certificate payloads carry DER, base64-encoded.
+		p.data(3, "PayloadContent", der)
+		p.closeDict(2)
+	}
+
 	p.raw(1, "</array>")
 
 	p.str(1, "PayloadType", "Configuration")
@@ -260,6 +291,23 @@ func (p *plist) str(n int, k, v string) {
 func (p *plist) num(n int, k string, v int) {
 	p.key(n, k)
 	p.raw(n, fmt.Sprintf("<integer>%d</integer>", v))
+}
+
+// data emits a <data> element, wrapped the way Apple's own profiles are so a
+// long certificate stays readable.
+func (p *plist) data(n int, k string, v []byte) {
+	p.key(n, k)
+	p.raw(n, "<data>")
+	enc := base64.StdEncoding.EncodeToString(v)
+	for len(enc) > 0 {
+		chunk := enc
+		if len(chunk) > 64 {
+			chunk = chunk[:64]
+		}
+		p.raw(n+1, chunk)
+		enc = enc[len(chunk):]
+	}
+	p.raw(n, "</data>")
 }
 
 func (p *plist) bool(n int, k string, v bool) {

@@ -47,6 +47,7 @@ type ikev2Flags struct {
 	nonRoutable, families       *string
 	probeURL, homeSSID          *string
 	ifID, serverCert, dpd       *string
+	caFile, onDemand            *string
 	keepalive                   *int
 	name, identifier            *string
 }
@@ -79,6 +80,16 @@ func registerIKEv2Flags(fs *flag.FlagSet) *ikev2Flags {
 		"xfrm interface id tying the CHILD_SA to a netdev; must match the `ip link add type xfrm if_id`")
 	f.serverCert = fs.String("server-cert", "",
 		"gateway certificate filename under /etc/swanctl/x509")
+	f.onDemand = fs.String("on-demand", "true",
+		"let iOS bring the tunnel up by itself (true|false). false ships a profile connected by"+
+			" hand, which is what a first test against a gateway that is not reachable from"+
+			" everywhere wants: on-demand with no probe makes the phone hold traffic wherever"+
+			" it cannot reach the gateway")
+	f.caFile = fs.String("ca", "",
+		"PEM file of the CA that signed the gateway certificate, embedded in the profile as a"+
+			" root payload. Required unless the gateway certificate is publicly trusted:"+
+			" without it the phone has nothing to validate the server against and fails with"+
+			" a generic connect error")
 	f.dpd = fs.String("dpd", ikev2.DPDHigh,
 		"DeadPeerDetectionRate: None, Low (30m), Medium (10m) or High (1m)."+
 			" This is also the fail-open latency, so it trades battery against availability")
@@ -106,6 +117,7 @@ func (f *ikev2Flags) config() (ikev2.Config, error) {
 		HomeSSIDs:         splitCSV(*f.homeSSID),
 		DPDRate:           strings.TrimSpace(*f.dpd),
 		KeepAliveInterval: *f.keepalive,
+		OnDemandDisabled:  !truthy(*f.onDemand),
 		ProfileName:       strings.TrimSpace(*f.name),
 		Identifier:        strings.TrimSpace(*f.identifier),
 	}
@@ -120,6 +132,13 @@ func (f *ikev2Flags) config() (ikev2.Config, error) {
 		if cfg.VIPGateway, err = netip.ParseAddr(v); err != nil {
 			return ikev2.Config{}, fmt.Errorf("-vip-gateway %q: %w", v, err)
 		}
+	}
+	if ca := strings.TrimSpace(*f.caFile); ca != "" {
+		pem, err := os.ReadFile(ca)
+		if err != nil {
+			return ikev2.Config{}, fmt.Errorf("-ca %q: %w", ca, err)
+		}
+		cfg.CAPEM = pem
 	}
 	if nr := strings.TrimSpace(*f.nonRoutable); nr != "" {
 		if cfg.NonRoutable, err = parsePrefixCSV(nr); err != nil {
@@ -193,6 +212,11 @@ func ExportIKEv2(cfg ikev2.Config, outSwanctl, outProfile string) error {
 	} else {
 		fmt.Fprintln(os.Stderr, "  4. no -probe-url given: the profile connects unconditionally,"+
 			" so an unreachable gateway holds traffic instead of releasing it")
+	}
+	if len(cfg.CAPEM) == 0 {
+		fmt.Fprintln(os.Stderr, "gotun ikev2: no -ca given, so the profile trusts nothing of its"+
+			" own. The gateway certificate must be signed by a publicly trusted CA, or the"+
+			" phone rejects it with a generic connect error that says nothing about trust.")
 	}
 	if !cfg.Families.V6 {
 		fmt.Fprintln(os.Stderr, "gotun ikev2: IPv6 selectors are OFF. iOS proposes both families, so the"+
