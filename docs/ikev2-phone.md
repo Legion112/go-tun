@@ -455,28 +455,43 @@ The shared-secret shape answers "can this phone connect". It cannot answer "can
 there is more than one phone.
 
 `gotun ikev2 user add <name>` writes one file per person into
-`/etc/swanctl/conf.d/`: a connection, a single-address pool, and a generated
-secret, mode 0600. The password is printed once and stored nowhere else -- not
-in the `.mobileconfig`, which is a file that gets AirDropped to a phone and
-then sits in Downloads. iOS keeps it in the keychain after the first connect,
-so On-Demand stays unattended.
+`/etc/swanctl/conf.d/`, containing a `secrets` stanza and nothing else, mode
+0600. The connection, the pool and the selectors stay shared with
+`eap_id = %any`, so issuing and withdrawing people never touches them. The
+password is printed once and stored nowhere else -- not in the `.mobileconfig`,
+which is a file that gets AirDropped to a phone and then sits in Downloads. iOS
+keeps it in the keychain after the first connect, so On-Demand stays unattended.
 
-### Why a whole connection per user, not just a secret
+### Identity is already known, so nothing needs pinning
 
-Because of the fixed address, which is what makes a name useful after the fact.
-strongSwan's pools are **per connection and not identity-aware**: one shared
-connection listing several pools hands out whichever address happens to be
-free, so a log entry from last week cannot be attributed to anybody. A
-connection per user with a one-address pool pins it -- measured: alice stays
-`10.231.17.17` across reconnects, bob `.18`.
+The first version of this gave every person their own connection and a
+one-address pool, to make the address-to-person mapping fixed. That was the
+wrong instinct, and measuring showed why: with **one shared connection**
+charon already reports
 
-Two things fall out of that for free. `swanctl --list-sas` names each SA after
-its connection, so the gateway can say who is who without any extra machinery.
-And `swanctl --terminate --ike <name>` addresses exactly one person.
+```
+users: #1, ESTABLISHED, IKEv2
+  remote 'alice' @ 10.60.0.10[4500] [10.70.0.17]
+```
 
-One file per user rather than one file with N stanzas, because revocation is
-then a delete: nothing has to parse and rewrite a configuration that is
-currently authenticating other people.
+and in machine-readable form, one line per SA,
+
+```
+uniqueid=1 ... remote-id=alice ... remote-vips=[10.70.0.17]
+```
+
+Identity, public address and assigned address, together, with no per-user
+configuration at all. `swanctl --terminate --ike-id 1` then ends exactly that
+person's session -- measured: alice's tunnel dies, bob's is untouched.
+
+So the per-user connection bought nothing for either attribution or revocation,
+and cost a duplicated 52-entry selector list per person -- two copies of the one
+decision this whole document is about, free to drift. It was removed.
+
+What it *did* buy is the one thing identity cannot: attributing an **old**
+packet log, since nftables and conntrack record addresses rather than
+identities. The cheap way to that is the pair above, logged at connect time --
+a small `updown` hook, the same shape as a DHCP lease log, and not built yet.
 
 ### Revoking takes two steps, and the first one looks like enough
 
@@ -487,34 +502,25 @@ around:
 |---|---|
 | delete the credential, `swanctl --load-all` | new sessions are refused -- `no EAP key found for hosts ... 'alice'` |
 | the session alice **already had** | **still works**, indefinitely |
-| `swanctl --terminate --ike alice` | the session ends; she cannot come back |
+| terminate the SA whose `remote-id` is alice | the session ends; she cannot come back |
 
 The reason is in the connection's own summary: `no reauthentication, rekeying
 every 14400s`. The IKE_SA rekeys without re-running EAP, so the secret is never
 consulted again after the initial authentication. Removing it is invisible to an
 established tunnel.
 
-So `user revoke` reloads **and** terminates, and fails with a non-zero exit if
-it cannot do the second part -- a revocation that reported success while the
-tunnel stayed up is the worst outcome available here. `-apply false` does
-neither and says `NOT APPLIED` on stderr, with both commands to run by hand.
+So `user revoke` reloads, lists, and terminates **every** SA with that identity
+-- every one, because charon's default uniqueness policy lets one credential be
+used from two devices at once and leaving the second up is a revocation that
+half happened -- and exits non-zero if it cannot. A revocation that reported
+success while the tunnel stayed up is the worst outcome available here.
+`-apply false` does none of it and says `NOT APPLIED` on stderr, with the
+commands to run by hand.
 
-`TestIKEv2Users_NamedCredentialsAreFixedAndRevocable` asserts the surviving
-session deliberately, with a note in the test: if that assertion ever starts
-failing, reauthentication has been turned on somewhere and both this document
-and the revoke path should be revisited.
-
-### A revoked address is held back
-
-Handing a revoked user's address to the next person would make every log entry
-from before the revocation attribute the old user's traffic to the new one --
-the one thing a fixed address was for. So `revoke` leaves a tombstone holding
-the name and the address.
-
-The tombstone carries no credential and its suffix deliberately does not match
-swanctl's `include conf.d/*.conf`, so charon cannot act on it. It is written
-before the credential is deleted, so a crash in between leaves the address held
-rather than silently free. `user purge` releases it, and says what that costs.
+`TestIKEv2Users_NamedCredentialsAreRevocable` asserts the surviving session
+deliberately, with a note in the test: if that assertion ever starts failing,
+reauthentication has been turned on somewhere and both this document and the
+revoke path should be revisited.
 
 ### Still a password, and that is a staging post
 

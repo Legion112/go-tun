@@ -280,7 +280,6 @@ gotun ikev2 user add alice -server vpn.example.net \
 
 gotun ikev2 user list
 gotun ikev2 user revoke alice
-gotun ikev2 user purge alice     # releases the held address
 ```
 
 `add` writes a 0600 snippet into `/etc/swanctl/conf.d/`, where swanctl's own
@@ -290,30 +289,44 @@ profile, which gets AirDropped to a phone and then sits in Downloads. iOS keeps
 it in the keychain after the first connect, so On-Demand needs no prompt
 afterwards.
 
-**One file per user, carrying a whole connection.** That is what buys a fixed
-address: strongSwan's pools are per-connection and not identity-aware, so one
-shared connection with several pools hands out whichever address is free rather
-than the person's own. A connection per user with a single-address pool pins it
-— and names the SA after the user, so `swanctl --list-sas` attributes traffic
-for free. Revocation is then a delete rather than an edit: nothing has to
+**Each per-user file is a credential and nothing else.** The connection, the
+pool and the traffic selectors stay shared, with `eap_id = %any`, so issuing
+and withdrawing people never touches them. One file per user rather than N
+stanzas in one file, because revocation is then a delete: nothing has to
 rewrite a configuration that is currently authenticating other people.
+
+**Who is connected comes from the daemon, not from state gotun keeps.** charon
+records the EAP identity of every SA next to the address it handed out, so
+`gotun ikev2 user list` can show it:
+
+```
+USER   ADDED             CONNECTED FROM  ADDRESS
+alice  2026-10-19 16:16  203.0.113.7     10.231.17.17
+bob    2026-10-19 16:16  -               -
+```
+
+That is also why nothing is pinned per user. An earlier version gave each
+person their own connection and a one-address pool to make the mapping fixed;
+it duplicated the whole 52-entry selector list per user to answer a question
+the daemon already answers.
 
 **Revoking takes two steps, and the second is the one that matters.** Removing
 the credential and reloading stops *new* sessions. It does nothing to an
 established one: the connection does not reauthenticate, so the IKE_SA rekeys
 without ever consulting the secret again and the tunnel survives indefinitely.
-Measured, and pinned in `TestIKEv2Users_NamedCredentialsAreFixedAndRevocable`.
-`user revoke` therefore reloads **and** terminates, and fails loudly if it
-cannot — a revocation that reported success while the tunnel stayed up is the
-worst outcome available here. `-apply false` skips both and says so.
+Measured, and pinned in `TestIKEv2Users_NamedCredentialsAreRevocable`.
+`user revoke` therefore reloads, finds every SA whose identity is that person —
+every one, because the default uniqueness policy lets one credential be used
+from two devices at once — terminates each by its unique id, and fails loudly
+if it cannot. A revocation that reported success while the tunnel stayed up is
+the worst outcome available here. `-apply false` skips both and says so.
 
-**A revoked address is held back, not reused.** Handing it to the next person
-would make every log entry from before the revocation attribute the old user's
-traffic to the new one, which is the one thing a fixed address was for. The
-tombstone carries no credential and does not match swanctl's include glob;
-`user purge` releases it as a deliberate step.
+**Attributing an old packet log** needs the identity-to-address pair recorded at
+connect time, since nftables and conntrack log addresses rather than
+identities. charon has both at that moment; logging them is a small `updown`
+hook and is not built yet.
 
-### The probe endpoint
+### The probe endpoint### The probe endpoint
 
 ```bash
 gotun watch ... -health-listen 0.0.0.0:8443
@@ -338,7 +351,7 @@ phone_deploy_test.go   → a phone tunnelling in over WireGuard
 ikev2_phone_test.go    → the same over IKEv2/IPsec: narrowed selectors,
                          MOBIKE roaming, and the generated config in charon
 multitransport_test.go → IKEv2 + WireGuard + the home LAN, all at once
-ikev2_users_test.go    → named credentials, fixed addresses, revocation
+ikev2_users_test.go    → named credentials, identity attribution, revocation
 ```
 
 `TestDeployTopo_EgressIdentity` places the Pi **only** on home LAN. A remote client on RU Internet reaches the Pi via home-router DNAT. The physical RU↔external uplink remains; the test proves path choice by **source identity** at destinations (`labhttp` `GET /peer` from `RemoteAddr`):
@@ -349,6 +362,15 @@ ikev2_users_test.go    → named credentials, fixed addresses, revocation
 ## Build & test
 
 Requires Go **1.26+**. Integration and large-set tests talk to the Docker **daemon** via the Engine API (socket / `DOCKER_HOST`); the `docker` CLI is only needed for `make docker-build`.
+
+CI runs all of it on every push and pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)): gofmt, both `vet`
+invocations, the unit tests, and the Docker labs. The lab job `modprobe`s
+`xfrm_interface` as a hard requirement and then fails if any lab reported
+`--- SKIP`, because nothing in a Go exit code separates "passed" from "skipped
+itself" and the tests that need a kernel feature or a daemon are exactly the
+ones that would skip. Large-set and MMDB-dependent tests still skip there:
+licensed MaxMind data is not in the repository.
 
 ```bash
 make build               # bin/gotun
@@ -373,9 +395,9 @@ gotun apply ... -clients-iface ipsec0,wgphone -mark-iface br-lan,ipsec0,wgphone 
 gotun ikev2 -server vpn.example.net -vip-subnet 10.231.17.0/24 \
   -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
   -probe-url http://vpn.example.net:8443/alive        # swanctl config + iOS .mobileconfig
-gotun ikev2 user add alice ...                        # one named credential, fixed address
-gotun ikev2 user list
-gotun ikev2 user revoke alice                         # reloads AND terminates the live session
+gotun ikev2 user add alice ...                        # one named credential, printed once
+gotun ikev2 user list                                 # plus who is connected, from the daemon
+gotun ikev2 user revoke alice                         # reloads AND terminates their sessions
 gotun watch ... -health-listen 0.0.0.0:8443           # GET /alive for the phone's on-demand probe
 gotun clear
 ```
