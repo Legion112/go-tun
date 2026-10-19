@@ -12,13 +12,15 @@ import (
 // Run dispatches gotun subcommands.
 func Run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gotun <fetch|amnezia|apply|watch|clear>")
+		return fmt.Errorf("usage: gotun <fetch|amnezia|ikev2|apply|watch|clear>")
 	}
 	switch args[0] {
 	case "fetch":
 		return runFetch(args[1:])
 	case "amnezia":
 		return runAmnezia(args[1:])
+	case "ikev2":
+		return runIKEv2(args[1:])
 	case "apply":
 		return runApply(args[1:])
 	case "watch":

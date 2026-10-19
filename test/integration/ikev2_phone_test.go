@@ -913,3 +913,121 @@ func saSerial(t *testing.T, listSAs string) string {
 	t.Fatalf("no established SA serial in:\n%s", listSAs)
 	return ""
 }
+
+// TestIKEv2Generated_ConfigIsAcceptedByCharon runs the shipping generator and
+// feeds its output to a real daemon.
+//
+// The unit tests pin what `gotun ikev2` writes; they cannot tell whether charon
+// agrees that it is a configuration. That gap matters more than usual here,
+// because the production selector list is 53 entries on one `local_ts` line and
+// nothing documents a limit -- on the file format, on charon, or on iOS. Two of
+// those three can be answered here.
+//
+// It also exercises the certificate path the deployed profile uses, which the
+// PSK lab deliberately does not.
+func TestIKEv2Generated_ConfigIsAcceptedByCharon(t *testing.T) {
+	requireDocker(t)
+	ctx := context.Background()
+
+	if err := harness.DaemonOK(ctx); err != nil {
+		t.Fatalf("docker daemon not reachable: %v", err)
+	}
+	if err := harness.ImageExists(ctx, image); err != nil {
+		t.Fatalf("image %s missing; run make docker-build: %v", image, err)
+	}
+
+	prefix := fmt.Sprintf("gotungen%d", time.Now().UnixNano()%1_000_000)
+	lab, err := harness.NewLab(ctx, prefix)
+	if err != nil {
+		t.Fatalf("docker lab: %v", err)
+	}
+	t.Cleanup(func() { lab.Close(context.Background()) })
+
+	must(t, lab.CreateNetwork(ctx, "inet", "10.40.0.0/24"))
+	must(t, lab.RunContainer(ctx, "flint", image, "10.40.0.2", "inet", nil))
+	must(t, lab.WaitReady(ctx, "flint"))
+
+	// Production-shaped: the real non-routable defaults, both families, and a
+	// public probe host -- not the lab's artificial private list.
+	out, err := lab.Exec(ctx, "flint", "gotun", "ikev2",
+		"-server", "vpn.example.net",
+		"-vip-subnet", ikev2VIPSubnet,
+		"-vip-gateway", ikev2GatewayVIP,
+		"-pool", ikev2PoolAddrs,
+		"-probe-url", "http://vpn.example.net:8443/alive",
+		"-client-id", "iphone",
+		"-if-id", ikev2IfID,
+		"-out-swanctl", "/etc/swanctl/swanctl.conf",
+		"-out-profile", "/tmp/phone.mobileconfig",
+	)
+	if err != nil {
+		t.Fatalf("gotun ikev2: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "traffic selectors") {
+		t.Errorf("unexpected output:\n%s", out)
+	}
+
+	// A throwaway PKI, because the generated configuration authenticates the
+	// gateway with a certificate and charon refuses a connection whose
+	// credential is absent.
+	must(t, lab.ExecOK(ctx, "flint", "bash", "-c", `
+set -e
+pki --gen --type ecdsa --size 256 --outform pem > /etc/swanctl/private/ca.key
+pki --self --ca --in /etc/swanctl/private/ca.key --type ecdsa --dn "CN=gotun-lab-ca" \
+  --outform pem > /etc/swanctl/x509ca/ca.pem
+pki --gen --type ecdsa --size 256 --outform pem > /etc/swanctl/private/gw.key
+pki --pub --in /etc/swanctl/private/gw.key --type ecdsa \
+  | pki --issue --cacert /etc/swanctl/x509ca/ca.pem --cakey /etc/swanctl/private/ca.key \
+      --dn "CN=vpn.example.net" --san vpn.example.net --flag serverAuth \
+      --outform pem > /etc/swanctl/x509/gotun-gw.pem
+`))
+
+	must(t, lab.ExecOK(ctx, "flint", "bash", "-c",
+		`printf 'charon {\n  filelog {\n    stderr {\n      default = 1\n    }\n  }\n}\n' > /etc/strongswan.d/zz-lab.conf`))
+	must(t, lab.ExecOK(ctx, "flint", "bash", "-c", `/usr/lib/ipsec/charon > /tmp/charon.log 2>&1 &`))
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := lab.ExecOK(ctx, "flint", "swanctl", "--stats"); err == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	loaded, err := lab.Exec(ctx, "flint", "swanctl", "--load-all")
+	if err != nil {
+		log, _ := lab.Exec(ctx, "flint", "cat", "/tmp/charon.log")
+		t.Fatalf("swanctl --load-all: %v\n%s\ncharon log:\n%s", err, loaded, log)
+	}
+	for _, want := range []string{
+		"loaded connection 'phone'",
+		"successfully loaded 1 connections, 0 unloaded",
+		"loaded pool 'phone-pool'",
+	} {
+		if !strings.Contains(loaded, want) {
+			t.Errorf("load output missing %q:\n%s", want, loaded)
+		}
+	}
+
+	// Accepted is not the same as kept. charon could have parsed the line and
+	// retained a truncated list, which would narrow the tunnel silently, so the
+	// selectors are read back out of the loaded connection.
+	conns, err := lab.Exec(ctx, "flint", "swanctl", "--list-conns")
+	if err != nil {
+		t.Fatalf("swanctl --list-conns: %v", err)
+	}
+	for _, want := range []string{
+		ikev2VIPSubnet, // the punched-back resolver subnet
+		"2000::/3",     // the single IPv6 selector
+		"11.0.0.0/8",   // a representative v4 gap
+	} {
+		if !strings.Contains(conns, want) {
+			t.Errorf("loaded connection does not carry selector %s:\n%s", want, conns)
+		}
+	}
+	// The private space the phone has to keep on-link must not be in there.
+	for _, mustNot := range []string{"192.168.0.0/16", "10.0.0.0/8", "0.0.0.0/0"} {
+		if strings.Contains(conns, mustNot) {
+			t.Errorf("loaded connection tunnels private space %s:\n%s", mustNot, conns)
+		}
+	}
+}
