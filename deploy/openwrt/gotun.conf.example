@@ -25,6 +25,35 @@ GOTUN_LAN=192.168.8.0/24
 # split routing at all.
 GOTUN_MARK_IFACE=br-lan
 
+# Inbound clients-facing devices gotun does not own, comma-separated: netifd's
+# WireGuard interface, the xfrm interface an IKEv2 CHILD_SA surfaces on, or
+# both at once. gotun holds no credential for them.
+#
+# Each must also appear in GOTUN_MARK_IFACE -- apply refuses otherwise, because
+# a clients interface missing from the ingress guard means those clients are
+# never classified and follow the ISP while everybody else is tunnelled, with
+# nothing anywhere reporting it.
+GOTUN_CLIENTS_IFACE=ipsec0
+
+# Serves GET /alive: 200 while the tunnel carries traffic, 503 once the
+# watchdog has withdrawn the route. It exists for a phone's IKEv2 On-Demand
+# URLStringProbe, so the phone connects only when the exit hop actually works
+# rather than when a web server happens to be up.
+#
+# Bound to the WAN address rather than 0.0.0.0 because uhttpd owns
+# 127.0.0.1:8443 on this box. Published through the NATs in front of the
+# router, so the body says only "up" or "down".
+GOTUN_HEALTH_LISTEN=192.168.1.10:8443
+
+# Read by /etc/init.d/gotun-ipsec, which creates the xfrm interface above.
+# The address is load-bearing: charon installs no route for an xfrm interface,
+# so without an on-link prefix every reply to a client fails source address
+# selection while the SA still reads ESTABLISHED.
+GOTUN_IPSEC_IFACE=ipsec0
+GOTUN_IPSEC_IFID=0x61
+GOTUN_IPSEC_ADDR=10.231.17.1/24
+GOTUN_IPSEC_MTU=1400
+
 # Hosts whose own traffic is never classified, matched on source address.
 # Comma-separated, bare addresses allowed.
 #

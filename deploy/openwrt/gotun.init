@@ -40,13 +40,15 @@ start_service() {
 		-tunnel-iface "$GOTUN_TUNNEL_IFACE" \
 		-lan "$GOTUN_LAN" \
 		-mark-iface "$GOTUN_MARK_IFACE" \
+		-clients-iface "$GOTUN_CLIENTS_IFACE" \
 		-direct-src "$GOTUN_DIRECT_SRC" \
 		-fail-mode "${GOTUN_FAIL_MODE:-open}" \
 		-ipv6 "${GOTUN_IPV6:-off}" \
 		-probe-target "${GOTUN_PROBE_TARGET:-1.1.1.1:443}" \
 		-probe-interval "${GOTUN_PROBE_INTERVAL:-60s}" \
 		-fail-after "${GOTUN_FAIL_AFTER:-3}" \
-		-recover-after "${GOTUN_RECOVER_AFTER:-2}"
+		-recover-after "${GOTUN_RECOVER_AFTER:-2}" \
+		-health-listen "$GOTUN_HEALTH_LISTEN"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stderr 1
 	procd_set_param file "$CONF"

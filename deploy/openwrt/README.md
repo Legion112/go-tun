@@ -33,6 +33,9 @@ binary and the config directory:
 
 ```sh
 printf '/usr/bin/gotun\n/etc/gotun/\n/etc/init.d/gotun\n/etc/hotplug.d/iface/99-gotun\n' >> /etc/sysupgrade.conf
+# With the IKEv2 transport, the xfrm interface script and everything swanctl
+# holds -- the CA key above all, since losing it means reissuing every profile.
+printf '/etc/init.d/gotun-ipsec\n/etc/swanctl/\n' >> /etc/sysupgrade.conf
 ```
 
 Without this, a firmware upgrade silently leaves the router with no classifier:
@@ -177,6 +180,109 @@ browser, at the address players actually dial.
 `-mark-iface` cannot express this: such a host normally shares `br-lan` with
 every ordinary client, so scoping by ingress interface would exempt the whole
 LAN with it.
+
+## A phone on IKEv2/IPsec
+
+Deployed and measured on this router. The pieces, in the order they have to
+exist:
+
+```sh
+opkg update
+opkg install kmod-xfrm-interface xfrm strongswan-full strongswan-swanctl strongswan-pki
+```
+
+`kmod-xfrm-interface` is the go/no-go. Without it `ip link add type xfrm`
+answers `RTNETLINK answers: Not supported`, route-based IPsec is impossible,
+and the fallback -- classifying by source address rather than by ingress
+interface -- is not built. The package exists for this kernel; it is simply not
+installed by default.
+
+Then the interface, the PKI, and the configuration:
+
+```sh
+scp deploy/openwrt/gotun-ipsec.init root@router:/etc/init.d/gotun-ipsec
+ssh root@router 'chmod +x /etc/init.d/gotun-ipsec && /etc/init.d/gotun-ipsec enable && /etc/init.d/gotun-ipsec start'
+
+ssh root@router 'cd /etc/swanctl
+  pki --gen --type ecdsa --size 256 --outform pem > private/gotun-ca.key
+  pki --self --ca --in private/gotun-ca.key --type ecdsa --dn "CN=gotun home CA" \
+      --lifetime 3650 --outform pem > x509ca/gotun-ca.pem
+  pki --gen --type ecdsa --size 256 --outform pem > private/gotun-gw.key
+  pki --pub --in private/gotun-gw.key --type ecdsa | pki --issue \
+      --cacert x509ca/gotun-ca.pem --cakey private/gotun-ca.key \
+      --dn "CN=vpn.home" --san vpn.home --san <public-ip> \
+      --flag serverAuth --lifetime 3650 --outform pem > x509/gotun-gw.pem
+  chmod 600 private/gotun-ca.key private/gotun-gw.key'
+
+gotun ikev2 -server <public-ip> -gateway-id vpn.home \
+  -ca /etc/swanctl/x509ca/gotun-ca.pem -server-cert gotun-gw.pem \
+  -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
+  -if-id 0x61 -families v4 \
+  -out-swanctl /etc/swanctl/conf.d/gotun-ikev2.conf
+gotun ikev2 user add <name> ...   # the same flags, plus -probe-url and -home-ssid
+```
+
+Put the gateway certificate's **public** address in a SAN and pass it as
+`-gateway-id`: iOS authenticates the server and then checks the identifier
+separately, so a mismatch fails after a successful handshake and reads as a
+crypto problem rather than a naming one.
+
+### Firewall
+
+A zone of its own, by device rather than by network, because the interface is
+not netifd's:
+
+```sh
+uci set firewall.ipseczone=zone
+uci set firewall.ipseczone.name=ipsec
+uci set firewall.ipseczone.device=ipsec0
+uci set firewall.ipseczone.input=REJECT
+uci set firewall.ipseczone.forward=REJECT
+uci set firewall.ipseczone.mtu_fix=1
+# ipsec -> wan carries the direct class, ipsec -> the tun zone the tunnel class.
+# NOT ipsec -> lan: gotun's home_nets rule is the second line of defence, and
+# the traffic selectors are the first.
+```
+
+Plus an input rule for DNS from the zone, and `udp 500` and `udp 4500` from
+`wan`. `uci batch` splits values on whitespace, so a multi-valued option has to
+be written with `add_list` -- `dest_port='500 4500'` in a batch silently
+becomes `500`.
+
+### What the upstream NAT needs
+
+Two layers here, so the forwards go on the **upstream** router, not this one:
+`udp 500`, `udp 4500`, and the probe's TCP port, all to this router's WAN
+address. Pin that address to the MAC on the upstream DHCP server, or the
+forwards quietly start pointing at nothing.
+
+**Hairpin does not work** on the measured upstream (an MTS GPON ONT): from
+inside the house, the public address times out. So a phone at home cannot dial
+the public address, and the profile needs `-home-ssid` listing every SSID that
+lands on this router -- the tunnel is then simply off at home, where the split
+already comes from the classifier anyway.
+
+### Measured on the live router
+
+- iOS accepted all **52 traffic selectors** in one `local_ts`. The limit is
+  undocumented and this was the open question; it is answered.
+- iOS accepted the self-signed gateway certificate from the CA payload the
+  profile carries, with no separate install and no trust toggle.
+- iOS negotiated `AES_CBC-256/HMAC_SHA2_256/MODP_2048`, not the GCM/ECP entries
+  offered first. Works, but MODP-2048 is a slow DH on this CPU.
+- Leaving home Wi-Fi, iOS sent **no DELETE** -- it simply stopped. The stale SA
+  lingered until the next connect arrived with `INITIAL_CONTACT`. From the
+  gateway, a departed client and a present one look identical, which is why
+  `gotun ikev2 user revoke` terminates rather than trusting the session to be
+  gone.
+- `uhttpd` owns `127.0.0.1:8443` here, so the health endpoint binds the WAN
+  address instead. It logs the bind failure and carries on rather than taking
+  the watchdog down with it.
+- **The phone does not use the pushed resolver.** charon sends it
+  (`CPRP(ADDR DNS)` in the log) and the count of DNS packets to it is zero, so
+  iOS is resolving over encrypted DNS of its own. That traffic goes through the
+  tunnel, so nothing leaks -- but `.ru` names miss the GeoDNS treatment
+  `gotun-dns` exists for. Unsolved.
 
 ## Rollback
 
