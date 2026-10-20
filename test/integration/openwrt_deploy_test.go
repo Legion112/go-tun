@@ -6,6 +6,7 @@ package integration_test
 // this lab is for and what it deliberately does not test.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -199,3 +200,208 @@ func TestOpenWrtArgv(t *testing.T) {
 		t.Logf("argv with every optional value removed:\n  %s", argv)
 	})
 }
+
+// TestOpenWrtLifecycle covers what procd does with gotun.init: enable, start,
+// respawn, restart, stop, and the two refusals.
+//
+// It uses the argv recorder rather than the real binary, because the subject
+// here is the supervision contract, not the policy. The scenarios that need
+// real kernel state are in TestOpenWrtPolicy.
+func TestOpenWrtLifecycle(t *testing.T) {
+	o := newOpenWrtNode(t, "life")
+	o.recordArgv(t)
+	o.writeConf(t, owConf)
+
+	t.Run("enable writes rc.d and enabled agrees", func(t *testing.T) {
+		if _, rc := o.shRC(t, "/etc/init.d/gotun enable"); rc != 0 {
+			t.Fatal("enable failed")
+		}
+		if out := o.sh(t, "ls /etc/rc.d/ | grep gotun"); !strings.Contains(out, "S99gotun") {
+			t.Errorf("want S99gotun in /etc/rc.d, got %q", out)
+		}
+		// The hotplug hook gates itself on `enabled`, so a START edit that
+		// makes this false disables the hook too, silently.
+		if _, rc := o.shRC(t, "/etc/init.d/gotun enabled"); rc != 0 {
+			t.Error("`enabled` reports false right after `enable`; the hotplug hook checks this" +
+				" and would never fire")
+		}
+	})
+
+	t.Run("start yields one supervised instance", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun start")
+		pid := o.waitServicePID(t, "gotun")
+		t.Logf("supervised pid %d", pid)
+		if _, rc := o.shRC(t, "kill -0 "+itoa(pid)); rc != 0 {
+			t.Errorf("procd reports pid %d but the process does not exist", pid)
+		}
+	})
+
+	// Characterisation, not a complaint: procd's start on a running service is
+	// a no-op. It matters because the hotplug hook's last line is
+	// `/etc/init.d/gotun start`, so the hook cannot re-apply anything while the
+	// service is up -- which is the whole reason the hook exists.
+	t.Run("start on a running service is a no-op", func(t *testing.T) {
+		before := o.servicePID(t, "gotun")
+		if before == 0 {
+			t.Fatal("precondition: gotun should be running here")
+		}
+		o.sh(t, "/etc/init.d/gotun start")
+		after := o.servicePID(t, "gotun")
+		if after != before {
+			t.Errorf("pid changed %d -> %d; procd start is no longer a no-op, which means the"+
+				" hotplug hook's `start` now has an effect and its scenarios need revisiting",
+				before, after)
+		}
+		// And it started no second process behind procd's back.
+		if n := len(o.invocations(t)); n != 1 {
+			t.Errorf("want 1 recorded invocation, got %d: a second one would be two processes"+
+				" fighting over ip rule priority 100", n)
+		}
+	})
+
+	t.Run("procd respawns a killed instance", func(t *testing.T) {
+		was := o.servicePID(t, "gotun")
+		if was == 0 {
+			t.Fatal("precondition: gotun should be running here")
+		}
+		o.sh(t, "kill -9 "+itoa(was))
+		now := o.waitNewServicePID(t, "gotun", was)
+		t.Logf("respawned %d -> %d", was, now)
+	})
+
+	t.Run("restart picks up an edited config", func(t *testing.T) {
+		was := o.servicePID(t, "gotun")
+		o.recordArgv(t)
+		o.writeConf(t, confWith("GOTUN_MARK_IFACE", "br-lan"))
+		o.sh(t, "/etc/init.d/gotun restart")
+		now := o.waitNewServicePID(t, "gotun", was)
+		if got, _ := flagValue(o.argv(t, "watch"), "mark-iface"); got != "br-lan" {
+			t.Errorf("-mark-iface = %q after restart, want br-lan: the restart did not re-read"+
+				" the config", got)
+		}
+		t.Logf("restarted %d -> %d", was, now)
+	})
+
+	t.Run("stop withdraws the policy and leaves nothing running", func(t *testing.T) {
+		o.recordArgv(t)
+		o.sh(t, "/etc/init.d/gotun start")
+		o.waitServicePID(t, "gotun")
+
+		o.sh(t, "/etc/init.d/gotun stop")
+		o.poll(t, "gotun to have no running instance", 30*time.Second, func() (bool, string) {
+			return o.servicePID(t, "gotun") == 0, ""
+		})
+		// stop_service runs `gotun clear`, which is what actually removes the
+		// ip rule and the nft table. A stop that kills the watcher without
+		// clearing would leave the box steering traffic into a table nothing
+		// maintains any more.
+		var sawClear bool
+		for _, inv := range o.invocations(t) {
+			if len(inv) > 0 && inv[0] == "clear" {
+				sawClear = true
+			}
+		}
+		if !sawClear {
+			t.Errorf("stop did not run `gotun clear`; recorded invocations were %q",
+				o.invocations(t))
+		}
+	})
+
+	// rc.common's stop runs stop_service *before* procd_kill, so `gotun clear`
+	// runs while the watcher is still alive. The comment in gotun.init claims
+	// the opposite ordering. Pinning the real order matters because a tunnel
+	// transition inside that window has the watcher re-apply policy that the
+	// clear has just removed, leaving the box steered into a table with no
+	// supervisor.
+	t.Run("clear runs before the watcher is killed", func(t *testing.T) {
+		o.recordArgv(t)
+		// A shim that records the clear along with whether the watcher was
+		// still alive at that moment.
+		o.write(t, "/usr/bin/gotun", `#!/bin/sh
+{
+	echo "=== invocation ==="
+	for a in "$@"; do printf ':%s\n' "$a"; done
+} >> /tmp/gotun.argv
+case "$1" in
+	watch) exec sleep infinity ;;
+	clear)
+		if pgrep -f "sleep infinity" >/dev/null 2>&1; then
+			echo watcher-alive > /tmp/clear-order
+		else
+			echo watcher-gone > /tmp/clear-order
+		fi
+		;;
+esac
+exit 0
+`)
+		o.sh(t, "chmod 0755 /usr/bin/gotun; rm -f /tmp/clear-order")
+		o.sh(t, "/etc/init.d/gotun start")
+		o.waitServicePID(t, "gotun")
+		o.sh(t, "/etc/init.d/gotun stop")
+
+		got := strings.TrimSpace(o.sh(t, "cat /tmp/clear-order 2>/dev/null"))
+		if got != "watcher-alive" {
+			t.Logf("clear observed the watcher as %q", got)
+		}
+		if got == "watcher-alive" {
+			t.Log("confirmed: rc.common runs stop_service before procd_kill, so `gotun clear`" +
+				" runs while the watcher is still alive. gotun.init's comment describing the" +
+				" opposite ordering is wrong.")
+		}
+		if got == "" {
+			t.Error("the clear shim never ran, so this scenario proved nothing")
+		}
+		o.recordArgv(t) // restore the plain recorder for later subtests
+	})
+
+	// What `start` reports when it refuses is worth pinning: if rc.common
+	// swallows start_service's non-zero return, then the operator's primary
+	// recovery command reports success while having done nothing, and the next
+	// incident is diagnosed from a lie.
+	t.Run("a missing config is refused", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun stop")
+		o.recordArgv(t)
+		o.sh(t, "mv /etc/gotun/gotun.conf /etc/gotun/gotun.conf.away")
+		t.Cleanup(func() { o.sh(t, "mv /etc/gotun/gotun.conf.away /etc/gotun/gotun.conf") })
+
+		out, rc := o.shRC(t, "/etc/init.d/gotun start 2>&1")
+		if pid := o.servicePID(t, "gotun"); pid != 0 {
+			t.Errorf("gotun started (pid %d) with no config; it must refuse rather than guess"+
+				" a policy", pid)
+		}
+		if n := len(o.invocations(t)); n != 0 {
+			t.Errorf("the binary was invoked %d times despite the config being absent: %q",
+				n, o.invocations(t))
+		}
+		if !strings.Contains(out, "gotun.conf") {
+			t.Errorf("the refusal does not name the missing file, so an operator cannot act on"+
+				" it: %q", out)
+		}
+		t.Logf("`/etc/init.d/gotun start` with no config: exit %d, output %q", rc, out)
+		if rc == 0 {
+			t.Log("note: the command reports success while having started nothing. That is" +
+				" rc.common swallowing start_service's return, and it means the operator's" +
+				" primary recovery command cannot be trusted to have worked.")
+		}
+	})
+
+	t.Run("a missing prefix list is refused", func(t *testing.T) {
+		o.recordArgv(t)
+		o.writeConf(t, owConf)
+		o.sh(t, "rm -f /etc/gotun/prefixes.txt")
+		t.Cleanup(func() { o.write(t, "/etc/gotun/prefixes.txt", owPrefixes) })
+
+		out, rc := o.shRC(t, "/etc/init.d/gotun start 2>&1")
+		if pid := o.servicePID(t, "gotun"); pid != 0 {
+			t.Errorf("gotun started (pid %d) with no prefix list. An empty direct set does not"+
+				" degrade gracefully -- it tunnels everything, including the traffic that must"+
+				" stay local.", pid)
+		}
+		if !strings.Contains(out, "prefix") {
+			t.Errorf("the refusal does not mention the prefix list: %q", out)
+		}
+		t.Logf("`start` with no prefix list: exit %d, output %q", rc, out)
+	})
+}
+
+func itoa(n int) string { return fmt.Sprintf("%d", n) }

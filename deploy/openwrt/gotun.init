@@ -57,7 +57,12 @@ start_service() {
 }
 
 stop_service() {
-	# Removes the ip rule first, so nothing is steered into a table being torn
-	# down.
+	# rc.common runs this *before* procd_kill, so the watcher is still alive
+	# while clear runs -- measured in the deploy lab, and the opposite of what
+	# this comment used to claim. A tunnel transition inside that window has the
+	# watcher re-apply the policy clear has just removed, leaving the box
+	# steered into a table with no supervisor. Narrow, but real, and the reason
+	# the refactor should have the watcher do its own teardown on SIGTERM
+	# rather than have a second process race it.
 	/usr/bin/gotun clear
 }
