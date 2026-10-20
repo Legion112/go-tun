@@ -2,14 +2,16 @@
 #
 # Installed as BOTH /etc/hotplug.d/iface/99-gotun and
 # /etc/hotplug.d/net/99-gotun, because the two kinds of event are not
-# interchangeable and only one of them exists on this deployment:
+# interchangeable:
 #
 #   iface  ACTION=ifup  INTERFACE=<UCI section>  DEVICE=<device>
 #   net    ACTION=add   INTERFACE=<device>       DEVICE=<empty>
 #
-# A device created outside netifd -- which is exactly how sing-box makes its tun
-# -- produces no iface event at all. For as long as this lived in iface/ alone
-# it was never invoked here. Measured in the deploy lab against real netifd.
+# A device netifd does not manage produces only the net event, so a tun with no
+# UCI section of its own is invisible to iface/ alone. flint2 happens to have
+# one -- network.xray0, named identically to the device -- which is why the
+# iface event fires there; a box without it would see nothing. Both shapes are
+# measured in the deploy lab against real netifd.
 #
 # Every decision lives in `gotun hotplug`: which event matters, which interface,
 # whether anything is running to re-apply. This file is plumbing, and the pipe

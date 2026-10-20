@@ -66,12 +66,14 @@ func runHotplug(args []string) error {
 	//   iface  ACTION=ifup  INTERFACE=<UCI section>  DEVICE=<device>
 	//   net    ACTION=add   INTERFACE=<device>       DEVICE=<empty>
 	//
-	// So an iface event names the section, not the device -- and the shell
-	// version compared that against a device name, which could never match.
-	// Worse, a device created outside netifd, which is exactly how sing-box
-	// makes its tun, produces *no iface event at all*: only a net event. The
-	// hook lived in /etc/hotplug.d/iface/ alone, so on this deployment it was
-	// never invoked.
+	// So an iface event names the section, not the device, and the shell
+	// version compared that against a device name -- which matches only where
+	// the two happen to coincide. flint2 is such a box (network.xray0 carries
+	// device xray0); anywhere the section is named differently, it never
+	// matched at all.
+	//
+	// And a device netifd does not manage produces only the net event, so a
+	// tun with no UCI section is invisible to a hook in iface/ alone.
 	//
 	// Both shapes are handled, and the hook is installed in both directories.
 	switch *action {

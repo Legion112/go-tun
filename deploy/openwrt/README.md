@@ -33,10 +33,16 @@ event describe themselves differently and only one of them happens here:
 | `iface` | `ifup` | the UCI section name | the device |
 | `net` | `add` | the device | empty |
 
-A device created outside netifd — which is exactly how sing-box makes its tun —
-produces **no `iface` event at all**. Installed in `iface/` alone, as it was
-until now, the hook was never invoked on this router. Measured in the deploy
-lab against real netifd.
+A device netifd does not manage produces **only** the `net` event, so a tun with
+no UCI section of its own is invisible to a hook in `iface/` alone. This router
+happens to have one — `network.xray0`, named identically to the device — which
+is why the `iface` event fires here; a box without it would see nothing.
+
+The naming coincidence also matters for the comparison. `INTERFACE` is the
+section name, so a hook matching on it works only where the section and the
+device share a name, as they do here. `gotun hotplug` matches `DEVICE` when the
+event carries one, which is correct either way. Both shapes are measured in the
+deploy lab against real netifd.
 
 Then create `/etc/gotun/gotun.conf` from `gotun.conf.example`, put the prefix list
 at the path it names, and check it before starting anything:
