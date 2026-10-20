@@ -54,6 +54,12 @@ GOTUN_IPSEC_IFID=0x61
 GOTUN_IPSEC_ADDR=10.231.17.1/24
 GOTUN_IPSEC_MTU=1400
 
+# The parent device is only a hint to the kernel -- the if_id is what binds SAs
+# to the interface -- so lo is deliberate. Naming the WAN device would be wrong
+# the moment ESP arrives somewhere else, such as from a client already on the
+# home LAN.
+GOTUN_IPSEC_PARENT=lo
+
 # Hosts whose own traffic is never classified, matched on source address.
 # Comma-separated, bare addresses allowed.
 #
@@ -80,7 +86,6 @@ GOTUN_PROBE_TARGET=1.1.1.1:443
 GOTUN_PROBE_INTERVAL=60s
 GOTUN_FAIL_AFTER=3
 GOTUN_RECOVER_AFTER=2
-GOTUN_IPV6=off
 
 # auto: classify IPv6 like IPv4, but only when it can actually work -- the peer
 #   must carry IPv6 and the prefix list must contain IPv6 entries. This is the

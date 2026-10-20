@@ -21,21 +21,34 @@
 START=89
 STOP=11
 
-IFACE="${GOTUN_IPSEC_IFACE:-ipsec0}"
-IFID="${GOTUN_IPSEC_IFID:-0x61}"
-ADDR="${GOTUN_IPSEC_ADDR:-10.231.17.1/24}"
-MTU="${GOTUN_IPSEC_MTU:-1400}"
-
-# lo rather than the WAN device. The parent is only a hint to the kernel -- the
-# if_id is what binds SAs to this interface -- and naming the WAN would be
-# wrong the moment ESP arrives somewhere else, such as from a client on the
-# home LAN.
-PARENT="${GOTUN_IPSEC_PARENT:-lo}"
-
 CONF=/etc/gotun/gotun.conf
 
-start() {
+# Resolves every parameter, config first and defaults second. This is a function
+# rather than file scope because file scope runs before start() sources the
+# config, so each default was being fixed before the operator's value had been
+# read -- every GOTUN_IPSEC_* line in gotun.conf was silently ignored and the
+# script used its own default instead.
+#
+# stop() calls it too: without the config it would resolve a different interface
+# name than start() created, and delete nothing.
+load_config() {
+	# shellcheck source=/dev/null
 	[ -f "$CONF" ] && . "$CONF"
+
+	IFACE="${GOTUN_IPSEC_IFACE:-ipsec0}"
+	IFID="${GOTUN_IPSEC_IFID:-0x61}"
+	ADDR="${GOTUN_IPSEC_ADDR:-10.231.17.1/24}"
+	MTU="${GOTUN_IPSEC_MTU:-1400}"
+
+	# lo rather than the WAN device. The parent is only a hint to the kernel --
+	# the if_id is what binds SAs to this interface -- and naming the WAN would
+	# be wrong the moment ESP arrives somewhere else, such as from a client on
+	# the home LAN.
+	PARENT="${GOTUN_IPSEC_PARENT:-lo}"
+}
+
+start() {
+	load_config
 
 	[ -d /sys/module/xfrm_interface ] || modprobe xfrm_interface 2>/dev/null
 	if [ ! -d /sys/module/xfrm_interface ]; then
@@ -57,5 +70,6 @@ start() {
 }
 
 stop() {
+	load_config
 	ip link del "$IFACE" 2>/dev/null
 }

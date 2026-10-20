@@ -23,7 +23,7 @@ CONF=/etc/gotun/gotun.conf
 # shellcheck source=/dev/null
 . "$CONF"
 
-[ "$INTERFACE" = "${GOTUN_TUNNEL_IFACE:-wgexit}" ] || exit 0
+[ "$INTERFACE" = "${GOTUN_TUNNEL_IFACE:-wg-exit}" ] || exit 0
 
 logger -t gotun "reapplying policy after ifup of $INTERFACE"
 /etc/init.d/gotun start

@@ -16,29 +16,53 @@ import (
 	"github.com/legion/go-tun/internal/tunnelwatch"
 )
 
+// watchFlags is what `watch` adds on top of the policy flags in applyFlags.
+// It is registered separately from runWatch so that the set of flags the
+// command accepts can be enumerated without running it -- which is what lets a
+// test compare it against the flags deploy/openwrt/gotun.init passes. A flag
+// renamed here and not there is not a test failure on the router, it is a
+// gateway that does not come back from a reboot.
+type watchFlags struct {
+	probeTarget   *string
+	probeInterval *time.Duration
+	probeTimeout  *time.Duration
+	failAfter     *int
+	recoverAfter  *int
+	cooldown      *time.Duration
+	healthListen  *string
+	bounceAfter   *time.Duration
+}
+
+func registerWatchFlags(fs *flag.FlagSet) (*applyFlags, *watchFlags) {
+	f := registerApplyFlags(fs)
+	w := &watchFlags{
+		probeTarget: fs.String("probe-target", "1.1.1.1:443",
+			"host:port to connect to through the tunnel to prove it carries traffic"),
+		probeInterval: fs.Duration("probe-interval", tunnelwatch.DefaultInterval, "how often to probe"),
+		probeTimeout:  fs.Duration("probe-timeout", tunnelwatch.DefaultTimeout, "per-probe connect timeout"),
+		failAfter: fs.Int("fail-after", tunnelwatch.DefaultFailAfter,
+			"consecutive failed probes before the tunnel route is withdrawn"),
+		recoverAfter: fs.Int("recover-after", tunnelwatch.DefaultRecoverAfter,
+			"consecutive successful probes before the tunnel route is restored"),
+		cooldown: fs.Duration("cooldown", tunnelwatch.DefaultCooldown,
+			"minimum gap between route transitions, bounding how fast the route can flap; 0 disables"),
+		healthListen: fs.String("health-listen", "",
+			"serve GET /alive on this address, 200 while the tunnel carries traffic and 503 once the"+
+				" route has been withdrawn. It exists for a phone's IKEv2 On-Demand URLStringProbe:"+
+				" published through the NATs in front of the gateway, it turns a dead exit hop into a"+
+				" VPN icon that is visibly off instead of a silent fallback to the local uplink."+
+				" The body says only up or down, because strangers can read it"),
+		bounceAfter: fs.Duration("bounce-after", 0,
+			"recreate the tunnel interface once it has been dead this long; 0 disables."+
+				" Leave it disabled whenever another daemon owns the interface (sing-box, netifd):"+
+				" bouncing a tun out from under its owner breaks the transport being recovered"),
+	}
+	return f, w
+}
+
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	f := registerApplyFlags(fs)
-	probeTarget := fs.String("probe-target", "1.1.1.1:443",
-		"host:port to connect to through the tunnel to prove it carries traffic")
-	probeInterval := fs.Duration("probe-interval", tunnelwatch.DefaultInterval, "how often to probe")
-	probeTimeout := fs.Duration("probe-timeout", tunnelwatch.DefaultTimeout, "per-probe connect timeout")
-	failAfter := fs.Int("fail-after", tunnelwatch.DefaultFailAfter,
-		"consecutive failed probes before the tunnel route is withdrawn")
-	recoverAfter := fs.Int("recover-after", tunnelwatch.DefaultRecoverAfter,
-		"consecutive successful probes before the tunnel route is restored")
-	cooldown := fs.Duration("cooldown", tunnelwatch.DefaultCooldown,
-		"minimum gap between route transitions, bounding how fast the route can flap; 0 disables")
-	healthListen := fs.String("health-listen", "",
-		"serve GET /alive on this address, 200 while the tunnel carries traffic and 503 once the"+
-			" route has been withdrawn. It exists for a phone's IKEv2 On-Demand URLStringProbe:"+
-			" published through the NATs in front of the gateway, it turns a dead exit hop into a"+
-			" VPN icon that is visibly off instead of a silent fallback to the local uplink."+
-			" The body says only up or down, because strangers can read it")
-	bounceAfter := fs.Duration("bounce-after", 0,
-		"recreate the tunnel interface once it has been dead this long; 0 disables."+
-			" Leave it disabled whenever another daemon owns the interface (sing-box, netifd):"+
-			" bouncing a tun out from under its owner breaks the transport being recovered")
+	f, w := registerWatchFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,14 +72,14 @@ func runWatch(args []string) error {
 	}
 	return Watch(WatchOptions{
 		Apply:        o,
-		ProbeTarget:  strings.TrimSpace(*probeTarget),
-		Interval:     *probeInterval,
-		Timeout:      *probeTimeout,
-		FailAfter:    *failAfter,
-		RecoverAfter: *recoverAfter,
-		Cooldown:     *cooldown,
-		BounceAfter:  *bounceAfter,
-		HealthListen: strings.TrimSpace(*healthListen),
+		ProbeTarget:  strings.TrimSpace(*w.probeTarget),
+		Interval:     *w.probeInterval,
+		Timeout:      *w.probeTimeout,
+		FailAfter:    *w.failAfter,
+		RecoverAfter: *w.recoverAfter,
+		Cooldown:     *w.cooldown,
+		BounceAfter:  *w.bounceAfter,
+		HealthListen: strings.TrimSpace(*w.healthListen),
 	})
 }
 

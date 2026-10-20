@@ -1,0 +1,35 @@
+# /etc/gotun/gotun-dns.conf -- read by /etc/init.d/gotun-dns.
+#
+# Sourced as root at boot, so it must contain assignments and comments only.
+#
+# Every value here has a default in the init script, so the file is optional and
+# the service starts without it. It is documented because the defaults are not
+# guessable, and because one of them deliberately disagrees with the binary's
+# own default (see GOTUN_DNS_LISTEN).
+#
+# Why a second resolver at all: resolving a foreign name from here without the
+# tunnel does not merely give a slower answer, it gives a *different* one --
+# geo-localised at best, interfered with at worst. Routing the query through the
+# tunnel is what makes the address the client finally connects to the right one.
+
+# gotun-dns's own default is :53, which is right for a standalone resolver and
+# wrong here: dnsmasq owns :53 on this box and also serves DHCP. dnsmasq
+# forwards to this address, so the two do not collide.
+#
+#   uci add_list dhcp.@dnsmasq[0].server=127.0.0.2
+#   uci commit dhcp && /etc/init.d/dnsmasq reload
+GOTUN_DNS_LISTEN=127.0.0.2:53
+
+# Upstream for names in the direct class, queried without a mark so the query
+# egresses the local uplink. A resolver in the same country as the client is the
+# point -- that is what makes the answer the local one.
+GOTUN_DNS_DIRECT=77.88.8.8:53
+
+# Upstream for everything else, dialed with SO_MARK so the query is steered into
+# table 100 and leaves through the tunnel.
+GOTUN_DNS_EXIT=1.1.1.1:53
+
+# Must match the mark gotun classifies with, or the queries marked here are not
+# the ones table 100 picks up and DNS quietly stops being tunnelled. Both sides
+# default to this value; change neither alone.
+GOTUN_DNS_MARK=0x1

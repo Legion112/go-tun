@@ -37,13 +37,14 @@ start_service() {
 	procd_set_param command /usr/bin/gotun watch \
 		-prefixes "$GOTUN_PREFIXES" \
 		-endpoint "$GOTUN_ENDPOINT" \
-		-tunnel-iface "$GOTUN_TUNNEL_IFACE" \
+		-tunnel-iface "${GOTUN_TUNNEL_IFACE:-wg-exit}" \
 		-lan "$GOTUN_LAN" \
 		-mark-iface "$GOTUN_MARK_IFACE" \
 		-clients-iface "$GOTUN_CLIENTS_IFACE" \
 		-direct-src "$GOTUN_DIRECT_SRC" \
 		-fail-mode "${GOTUN_FAIL_MODE:-open}" \
-		-ipv6 "${GOTUN_IPV6:-off}" \
+		-ipv6 "${GOTUN_IPV6:-auto}" \
+		-ipv6-fallback "${GOTUN_IPV6_FALLBACK:-direct}" \
 		-probe-target "${GOTUN_PROBE_TARGET:-1.1.1.1:443}" \
 		-probe-interval "${GOTUN_PROBE_INTERVAL:-60s}" \
 		-fail-after "${GOTUN_FAIL_AFTER:-3}" \
