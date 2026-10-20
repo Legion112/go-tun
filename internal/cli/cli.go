@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/prefixes"
 )
 
@@ -77,6 +78,9 @@ func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	f := registerApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := loadConfigInto(fs, *f.configPath, deployconf.WatchFlags); err != nil {
 		return err
 	}
 	o, err := f.options()

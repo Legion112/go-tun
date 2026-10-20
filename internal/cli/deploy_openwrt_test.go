@@ -247,25 +247,18 @@ func sameFlagValue(t *testing.T, g *flag.Flag, a, b string) bool {
 
 // --- A4/A5: documentation and use must cover each other ---------------------
 
-// scriptsReadingGotunConf are the files that source /etc/gotun/gotun.conf, and
-// so the files whose variables gotun.conf.example must document.
-var scriptsReadingGotunConf = []string{"gotun.init", "gotun-ipsec.init", "hotplug-iface-gotun"}
-
-func TestEveryDocumentedVariableIsRead(t *testing.T) {
-	documented := assignedVars(readDeploy(t, "gotun.conf.example"))
-	read := map[string]string{}
-	for _, s := range scriptsReadingGotunConf {
-		for _, v := range varsRead(readDeploy(t, s)) {
-			read[v] = s
-		}
-	}
-	for _, v := range documented {
-		if _, ok := read[v]; !ok {
-			t.Errorf("gotun.conf.example documents %s, but no script that sources gotun.conf reads it."+
-				" Editing it has no effect, which is worse than it being absent: it reads as a knob.", v)
-		}
-	}
-}
+// scriptsReadingGotunConf are the files that still source
+// /etc/gotun/gotun.conf. gotun.init no longer does: it passes the path to the
+// binary, which reads it through internal/deployconf.
+//
+// The companion to this test used to assert the other direction -- that every
+// documented variable is read by some script -- and it has been retired rather
+// than fixed. Its premise is now false: the fifteen policy settings are read by
+// the binary, not by a script, and "some script greps for it" was only ever a
+// proxy for "something consumes it". TestSchemaMatchesTheExample asserts that
+// directly and in both directions, against the single source of truth instead
+// of against whichever file happens to mention the name.
+var scriptsReadingGotunConf = []string{"gotun-ipsec.init", "hotplug-iface-gotun"}
 
 func TestEveryReadVariableIsDocumented(t *testing.T) {
 	documented := assignedVars(readDeploy(t, "gotun.conf.example"))
@@ -340,7 +333,7 @@ func TestHotplugTunnelIfaceDefaultMatchesGo(t *testing.T) {
 // --- A8: the config must be sourced before anything reads it ---------------
 
 func TestConfigIsSourcedBeforeItsVariablesAreRead(t *testing.T) {
-	for _, name := range []string{"gotun.init", "gotun-ipsec.init", "hotplug-iface-gotun"} {
+	for _, name := range scriptsReadingGotunConf {
 		lines := codeLines(readDeploy(t, name))
 		source := -1
 		for i, l := range lines {

@@ -240,8 +240,14 @@ func (o *owLab) write(t *testing.T, path, content string) {
 // instead of respawn-storming, and exits 0 for everything else -- `clear` in
 // particular, which stop_service runs synchronously and which would otherwise
 // hang the stop.
+//
+// `check` is delegated to the real binary rather than stubbed, because
+// gotun.init runs it as a pre-flight and stubbing it would make every refusal
+// scenario pass by never refusing. Only the long-running half is faked.
 func (o *owLab) recordArgv(t *testing.T) {
 	t.Helper()
+	// Keep the real binary reachable before overwriting the name.
+	o.sh(t, "[ -x /usr/bin/gotun.real ] || cp /usr/bin/gotun /usr/bin/gotun.real")
 	o.write(t, "/usr/bin/gotun", `#!/bin/sh
 {
 	echo "`+argvMarker+`"
@@ -249,6 +255,7 @@ func (o *owLab) recordArgv(t *testing.T) {
 } >> `+argvFile+`
 case "$1" in
 	watch) exec sleep infinity ;;
+	check) exec /usr/bin/gotun.real "$@" ;;
 esac
 exit 0
 `)
@@ -503,4 +510,39 @@ func (o *owLab) clearSyslog(t *testing.T) {
 		t.Fatalf("the syslog file is %s bytes after clearing it, so every assertion about"+
 			" what was or was not logged below would be reading stale lines", n)
 	}
+}
+
+// effectiveConfig runs `gotun check -config` and returns the settings it
+// reports, which is what the service will run with once the file, the flags and
+// the defaults have been reconciled.
+//
+// Asking the binary beats parsing the command line the init script built: it
+// covers the defaults the file does not mention, and it is the same command
+// gotun.init runs as its pre-flight, so a disagreement here is one the router
+// would hit too.
+func (o *owLab) effectiveConfig(t *testing.T) map[string]string {
+	t.Helper()
+	// gotun.real when the argv recorder has taken over the name, otherwise the
+	// binary itself.
+	bin := "/usr/bin/gotun"
+	if _, rc := o.shRC(t, "test -x /usr/bin/gotun.real"); rc == 0 {
+		bin = "/usr/bin/gotun.real"
+	}
+	out, rc := o.shRC(t, bin+" check -config /etc/gotun/gotun.conf 2>&1")
+	if rc != 0 {
+		t.Fatalf("`gotun check -config` refused the configuration (rc=%d):\n%s", rc, out)
+	}
+	eff := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if !strings.HasPrefix(l, "-") {
+			continue
+		}
+		name, value, _ := strings.Cut(strings.TrimPrefix(l, "-"), " ")
+		eff[name] = strings.TrimSpace(value)
+	}
+	if len(eff) == 0 {
+		t.Fatalf("`gotun check` reported no settings, so this assertion would prove nothing:\n%s", out)
+	}
+	return eff
 }

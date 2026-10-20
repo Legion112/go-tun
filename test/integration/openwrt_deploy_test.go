@@ -76,22 +76,70 @@ func TestOpenWrtFixture(t *testing.T) {
 	})
 }
 
-// TestOpenWrtArgv checks what gotun.init actually hands the binary.
+// TestOpenWrtArgv checks that gotun.init no longer maps anything.
 //
-// Most deploy-layer defects are of exactly this shape, and the argv is a
-// string: asserting on it directly is both faster and more precise than
-// inferring it from kernel state, which topology_test.go already covers in
-// depth. One container, no extra networks, many fast subtests.
+// It used to translate sixteen variables into sixteen flags, and most of this
+// file was assertions about that translation. The translation is gone: the
+// binary reads the file itself, so the only argv claim left is that the script
+// passes the file and nothing else. What those sixteen assertions were really
+// about -- that each setting reaches the binary with the right value -- is now
+// tested two better ways: exhaustively and in milliseconds by the tables in
+// internal/deployconf, and end to end by TestOpenWrtEffectiveConfig below,
+// which asks the binary what it resolved rather than inferring it from a
+// command line.
 func TestOpenWrtArgv(t *testing.T) {
 	o := newOpenWrtNode(t, "argv")
 	o.recordArgv(t)
+	o.writeConf(t, owConf)
+	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
+	o.waitServicePID(t, "gotun")
 
-	t.Run("a full config maps every value onto a flag", func(t *testing.T) {
-		o.writeConf(t, owConf)
-		o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
-		o.waitServicePID(t, "gotun")
-
+	t.Run("the service is started with the config and nothing else", func(t *testing.T) {
 		argv := o.argv(t, "watch")
+		want := []string{"watch", "-config", "/etc/gotun/gotun.conf"}
+		if len(argv) != len(want) {
+			t.Fatalf("argv is %q, want exactly %q: every flag here is a parameter named a"+
+				" second time, which is the duplication this refactor removed", argv, want)
+		}
+		for i := range want {
+			if argv[i] != want[i] {
+				t.Errorf("argv[%d] = %q, want %q", i, argv[i], want[i])
+			}
+		}
+	})
+
+	// The pre-flight is what makes a refusal reach the operator at all, since
+	// rc.common discards start_service's return value. If it stops running,
+	// `start` goes back to reporting success for a service it did not start.
+	t.Run("check runs as a pre-flight on every start", func(t *testing.T) {
+		var sawCheck bool
+		for _, inv := range o.invocations(t) {
+			if len(inv) > 0 && inv[0] == "check" {
+				sawCheck = true
+				if _, ok := flagValue(inv, "config"); !ok {
+					t.Errorf("check was run without -config: %q", inv)
+				}
+			}
+		}
+		if !sawCheck {
+			t.Errorf("gotun.init did not run `gotun check` before starting the service;"+
+				" recorded invocations were %q", o.invocations(t))
+		}
+	})
+}
+
+// TestOpenWrtEffectiveConfig asks the binary what the file resolved to.
+//
+// This is the question the argv assertions were standing in for, and asking it
+// directly is strictly better: it covers the file, the defaults and the
+// validation in one answer, and it is the same command gotun.init runs as its
+// pre-flight, so a drift here is a drift the router would also hit.
+func TestOpenWrtEffectiveConfig(t *testing.T) {
+	o := newOpenWrtNode(t, "eff")
+
+	t.Run("every setting in the file reaches the binary", func(t *testing.T) {
+		o.writeConf(t, owConf)
+		eff := o.effectiveConfig(t)
 		for _, c := range []struct{ flag, want string }{
 			{"prefixes", "/etc/gotun/prefixes.txt"},
 			{"endpoint", "10.60.0.2"},
@@ -103,102 +151,95 @@ func TestOpenWrtArgv(t *testing.T) {
 			{"ipv6", "off"},
 			{"ipv6-fallback", "direct"},
 			{"probe-target", "10.60.0.2:443"},
-			{"probe-interval", "1h"},
+			{"probe-interval", "1h0m0s"},
 			{"fail-after", "3"},
 			{"recover-after", "2"},
 		} {
-			got, ok := flagValue(argv, c.flag)
+			got, ok := eff[c.flag]
 			if !ok {
-				t.Errorf("-%s is not passed at all; the operator's value for it is ignored", c.flag)
+				t.Errorf("check does not report -%s at all", c.flag)
 				continue
 			}
 			if got != c.want {
-				t.Errorf("-%s = %q, want %q", c.flag, got, c.want)
+				t.Errorf("-%s resolved to %q, want %q", c.flag, got, c.want)
 			}
 		}
 	})
 
-	// GOTUN_IPV6_FALLBACK was documented in gotun.conf.example and passed by
-	// nothing, so an operator who set blackhole specifically to stop their real
-	// IPv6 address being seen was still egressing it. The value happened to
-	// coincide with the Go default, which is why nobody noticed.
-	t.Run("ipv6-fallback reaches the binary", func(t *testing.T) {
-		o.sh(t, "/etc/init.d/gotun stop")
-		o.recordArgv(t)
-		o.writeConf(t, confWith("GOTUN_IPV6_FALLBACK", "blackhole"))
-		o.sh(t, "/etc/init.d/gotun start")
-		o.waitServicePID(t, "gotun")
-
-		if got, _ := flagValue(o.argv(t, "watch"), "ipv6-fallback"); got != "blackhole" {
-			t.Errorf("-ipv6-fallback = %q, want blackhole: the knob is documented, so setting it"+
-				" must do something", got)
-		}
-	})
-
-	// An unset variable passed as a bare "$VAR" hands the binary an empty
-	// string, which overrides the Go default rather than letting it apply.
-	t.Run("an unset tunnel iface falls back to the Go default, not to empty", func(t *testing.T) {
-		o.sh(t, "/etc/init.d/gotun stop")
-		o.recordArgv(t)
-		o.writeConf(t, confWithout("GOTUN_TUNNEL_IFACE"))
-		o.sh(t, "/etc/init.d/gotun start")
-		o.waitServicePID(t, "gotun")
-
-		got, ok := flagValue(o.argv(t, "watch"), "tunnel-iface")
-		if ok && got == "" {
-			t.Error("-tunnel-iface is passed as an empty string, which overrides the Go default" +
-				" with nothing instead of leaving it in place")
-		}
-		if ok && got != "wg-exit" {
-			t.Errorf("-tunnel-iface = %q, want wg-exit (policy.DefaultTunnelIface)", got)
-		}
-	})
-
-	// off leaves IPv6 alone, which means it egresses the uplink directly. auto
-	// is both the Go default and the safer of the two, and a parameter must not
-	// mean one thing when set and another when unset.
-	t.Run("an unset ipv6 mode falls back to auto", func(t *testing.T) {
-		o.sh(t, "/etc/init.d/gotun stop")
-		o.recordArgv(t)
-		o.writeConf(t, confWithout("GOTUN_IPV6"))
-		o.sh(t, "/etc/init.d/gotun start")
-		o.waitServicePID(t, "gotun")
-
-		if got, _ := flagValue(o.argv(t, "watch"), "ipv6"); got != "auto" {
-			t.Errorf("-ipv6 = %q, want auto", got)
-		}
-	})
-
-	// A flag whose value is the empty string is not the same as a flag that is
-	// absent: the first overrides a default, the second lets it apply. Any flag
-	// with a non-empty Go default must never be handed "".
-	t.Run("no flag is handed an empty value", func(t *testing.T) {
-		o.sh(t, "/etc/init.d/gotun stop")
-		o.recordArgv(t)
-		// Every optional value removed at once: the worst realistic config, a
-		// file half-written by an interrupted sysupgrade.
+	// The property that replaces three of the old argv assertions at once. The
+	// init scripts expanded an unset variable into an empty string and handed
+	// it to the flag, overriding the Go default with nothing; a setting the
+	// file omits must now simply not be passed.
+	t.Run("a setting the file omits keeps its Go default", func(t *testing.T) {
+		// All of them gone at once, which is the worst realistic case: a file
+		// half-written by an interrupted sysupgrade.
 		conf := owConf
 		for _, k := range []string{
 			"GOTUN_TUNNEL_IFACE", "GOTUN_IPV6", "GOTUN_IPV6_FALLBACK", "GOTUN_FAIL_MODE",
-			"GOTUN_PROBE_TARGET", "GOTUN_PROBE_INTERVAL", "GOTUN_FAIL_AFTER", "GOTUN_RECOVER_AFTER",
+			"GOTUN_PROBE_TARGET", "GOTUN_PROBE_INTERVAL", "GOTUN_FAIL_AFTER",
+			"GOTUN_RECOVER_AFTER",
 		} {
-			conf = strings.Join(strings.Split(conf, k+"="), "#removed=")
+			conf = removeKey(conf, k)
 		}
 		o.writeConf(t, conf)
-		o.sh(t, "/etc/init.d/gotun start")
-		o.waitServicePID(t, "gotun")
 
-		argv := o.argv(t, "watch")
-		for _, f := range []string{
-			"tunnel-iface", "ipv6", "ipv6-fallback", "fail-mode",
-			"probe-target", "probe-interval", "fail-after", "recover-after",
+		eff := o.effectiveConfig(t)
+		for _, c := range []struct{ flag, want string }{
+			{"tunnel-iface", "wg-exit"}, // policy.DefaultTunnelIface
+			{"ipv6", "auto"},
+			{"ipv6-fallback", "direct"},
+			{"fail-mode", "open"},
+			{"probe-target", "1.1.1.1:443"},
+			{"probe-interval", "1m0s"}, // tunnelwatch.DefaultInterval
+			{"fail-after", "3"},
+			{"recover-after", "2"},
 		} {
-			if got, ok := flagValue(argv, f); ok && got == "" {
-				t.Errorf("-%s is passed as an empty string with no value behind it", f)
+			if got := eff[c.flag]; got != c.want {
+				t.Errorf("-%s resolved to %q with its setting absent from the file,"+
+					" want the Go default %q", c.flag, got, c.want)
 			}
 		}
-		t.Logf("argv with every optional value removed:\n  %s", argv)
 	})
+
+	// A typo used to read as a knob that did nothing. It now refuses, names the
+	// line, and suggests the real setting -- and because check is gotun.init's
+	// pre-flight, the service does not start on a config nobody meant.
+	t.Run("a misspelled setting is refused by name", func(t *testing.T) {
+		o.writeConf(t, strings.Replace(owConf, "GOTUN_MARK_IFACE=", "GOTUN_MARK_IFACES=", 1))
+		out, rc := o.shRC(t, "/usr/bin/gotun check -config /etc/gotun/gotun.conf 2>&1")
+		if rc == 0 {
+			t.Fatalf("check accepted a misspelled setting:\n%s", out)
+		}
+		for _, want := range []string{"GOTUN_MARK_IFACES", "Did you mean GOTUN_MARK_IFACE?"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the refusal does not mention %q, so the operator has to go hunting:\n%s",
+					want, out)
+			}
+		}
+	})
+
+	t.Run("a setting given twice is refused", func(t *testing.T) {
+		o.writeConf(t, owConf+"GOTUN_IPV6=auto\n")
+		out, rc := o.shRC(t, "/usr/bin/gotun check -config /etc/gotun/gotun.conf 2>&1")
+		if rc == 0 {
+			t.Fatalf("check accepted a setting assigned twice:\n%s", out)
+		}
+		if !strings.Contains(out, "already set on line") {
+			t.Errorf("the refusal does not say where the first assignment was:\n%s", out)
+		}
+	})
+}
+
+// removeKey drops one variable's assignment from a config.
+func removeKey(conf, key string) string {
+	var out []string
+	for _, l := range strings.Split(conf, "\n") {
+		if strings.HasPrefix(l, key+"=") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
 }
 
 // TestOpenWrtLifecycle covers what procd does with gotun.init: enable, start,
@@ -252,10 +293,18 @@ func TestOpenWrtLifecycle(t *testing.T) {
 				" hotplug hook's `start` now has an effect and its scenarios need revisiting",
 				before, after)
 		}
-		// And it started no second process behind procd's back.
-		if n := len(o.invocations(t)); n != 1 {
-			t.Errorf("want 1 recorded invocation, got %d: a second one would be two processes"+
-				" fighting over ip rule priority 100", n)
+		// And no second watcher started behind procd's back. Counted by
+		// subcommand, because every start also runs `check` as its pre-flight,
+		// so the total number of invocations legitimately grows.
+		var watchers int
+		for _, inv := range o.invocations(t) {
+			if len(inv) > 0 && inv[0] == "watch" {
+				watchers++
+			}
+		}
+		if watchers != 1 {
+			t.Errorf("want 1 recorded `watch`, got %d: a second one would be two processes"+
+				" fighting over ip rule priority 100", watchers)
 		}
 	})
 
@@ -269,15 +318,35 @@ func TestOpenWrtLifecycle(t *testing.T) {
 		t.Logf("respawned %d -> %d", was, now)
 	})
 
-	t.Run("restart picks up an edited config", func(t *testing.T) {
+	// A restart must replace the instance, since that is the only way an edited
+	// config takes effect: the binary reads the file once, at startup.
+	//
+	// Whether the new instance then honours the edit is not an argv question
+	// any more -- there is no argv to read -- and asserting it here would only
+	// re-test what TestOpenWrtEffectiveConfig covers directly and
+	// TestOpenWrtPolicy proves against real kernel state. What is checked here
+	// is procd's half: a new pid, and the pre-flight having run again on the
+	// edited file.
+	t.Run("restart replaces the instance and re-runs the pre-flight", func(t *testing.T) {
 		was := o.servicePID(t, "gotun")
 		o.recordArgv(t)
 		o.writeConf(t, confWith("GOTUN_MARK_IFACE", "br-lan,ipsec0"))
 		o.sh(t, "/etc/init.d/gotun restart")
 		now := o.waitNewServicePID(t, "gotun", was)
-		if got, _ := flagValue(o.argv(t, "watch"), "mark-iface"); got != "br-lan,ipsec0" {
-			t.Errorf("-mark-iface = %q after restart, want br-lan,ipsec0: the restart did not re-read"+
-				" the config", got)
+
+		var checks int
+		for _, inv := range o.invocations(t) {
+			if len(inv) > 0 && inv[0] == "check" {
+				checks++
+			}
+		}
+		if checks == 0 {
+			t.Errorf("restart did not re-run `gotun check`, so a config edited into an"+
+				" unusable state would be started rather than refused; recorded %q",
+				o.invocations(t))
+		}
+		if eff := o.effectiveConfig(t)["mark-iface"]; eff != "br-lan,ipsec0" {
+			t.Errorf("the edited config resolves -mark-iface to %q, want br-lan,ipsec0", eff)
 		}
 		t.Logf("restarted %d -> %d", was, now)
 	})
@@ -505,22 +574,31 @@ func applyArgsFrom(conf string) string {
 		v["GOTUN_IPV6"], v["GOTUN_IPV6_FALLBACK"])
 }
 
-// TestOpenWrtDegradedStart measures what happens when the tunnel device does
-// not exist yet at start, which is the ordinary case on every reboot: gotun is
-// START=99 and sing-box is still coming up.
+// TestOpenWrtDegradedStart covers the tunnel device not existing yet at start,
+// which is the ordinary case on every reboot: gotun is START=99 and sing-box is
+// still coming up.
 //
-// gotun.init's header promises graceful degradation here. Half of that is true
-// and the half that is not costs real CPU on the router, so both halves are
-// pinned: whichever way the refactor resolves it, it has to argue with this
-// test rather than with a comment.
+// This used to pin the opposite behaviour. watch treated a failed initial apply
+// as fatal, so procd restarted it roughly every five seconds -- rebuilding the
+// whole nft table each time, some 17,000 set elements on the router -- for as
+// long as the device stayed missing. It now logs and enters the loop, which is
+// what recovers from this.
+//
+// What is deliberately *not* asserted here is the convergence that follows.
+// tunnelwatch's probe binds to the tunnel device with SO_BINDTODEVICE, and a
+// dummy device drops everything, so a probe over one can never read healthy --
+// a real transport would be needed, which is topology_test.go's job. The
+// recovery path is covered where it belongs: TestWatch_FailedApplyIsRetried and
+// the drift tests in internal/tunnelwatch, with a fake prober, and
+// TestOpenWrtHotplug for the re-apply an ifup triggers.
 func TestOpenWrtDegradedStart(t *testing.T) {
 	o := newOpenWrtNode(t, "degr")
 	o.writeConf(t, owConf) // names xray0, which is deliberately never created
 	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
 
-	// The promise that holds: the classifier goes in, and table 100 is left
-	// empty. An ip rule pointing at an empty table falls through to main, so
-	// traffic keeps flowing on the uplink -- degraded, not broken.
+	// The classifier goes in, and table 100 is left empty. An ip rule pointing
+	// at an empty table falls through to main, so traffic keeps flowing on the
+	// uplink -- degraded, not broken.
 	t.Run("the classifier is installed and traffic is not black-holed", func(t *testing.T) {
 		o.poll(t, "the nft table to appear", 30*time.Second, func() (bool, string) {
 			_, rc := o.shRC(t, "nft list table inet gotun >/dev/null 2>&1")
@@ -535,58 +613,45 @@ func TestOpenWrtDegradedStart(t *testing.T) {
 		}
 	})
 
-	// The promise that does not hold. Watch returns an error from its initial
-	// apply, and `respawn 3600 5 0` has an unlimited retry count, so procd
-	// restarts it every five seconds for as long as the device stays missing --
-	// rebuilding the whole nft table each time, which on the router is some
-	// 17,000 set elements.
-	//
-	// It does self-heal: once the device appears, the next respawn succeeds.
-	// The cost is the interval before that, and the pathological case is a
-	// transport that never comes up at all.
-	t.Run("the service crash-loops instead of degrading", func(t *testing.T) {
-		// Counted from syslog, not by sampling the supervised pid. During a
-		// respawn loop the instance spends most of its time *not* running --
-		// it sits in procd's five-second gap -- so polling for a live pid
-		// catches nothing and would read as "started once, stable". The count
-		// of failed initial applies is direct evidence and cannot be missed.
+	t.Run("the service survives and does not respawn-loop", func(t *testing.T) {
+		pid := o.waitServicePID(t, "gotun")
+
+		// Counted from syslog rather than by sampling the pid, because that is
+		// what a loop looks like: during one, the instance spends most of its
+		// time inside procd's five-second respawn gap with no pid at all, so
+		// polling for a live pid reads as "started once, stable" -- the exact
+		// opposite of what is happening.
 		first := o.applyFailures(t)
 		time.Sleep(11 * time.Second)
 		second := o.applyFailures(t)
 
-		t.Logf("failed initial applies: %d, then %d eleven seconds later", first, second)
+		t.Logf("supervised pid %d; failed initial applies: %d, then %d eleven seconds later",
+			pid, first, second)
 		if first == 0 {
 			t.Fatal("the initial apply did not fail at all, so this scenario is no longer" +
 				" measuring what it was written for -- re-read it before deleting it")
 		}
-		if second <= first {
-			t.Logf("note: the count stopped growing, so the service is no longer restarting." +
-				" If Watch has been changed to survive a failed initial apply, this scenario" +
-				" is now the regression guard for that and should assert a stable pid instead.")
-			return
+		if second != first {
+			t.Errorf("the initial apply failed %d more times in eleven seconds, so watch is"+
+				" still exiting and procd is still restarting it about every five seconds."+
+				" Each restart rebuilds the entire nft table.", second-first)
 		}
-		// Roughly one attempt per five seconds, each one rebuilding the entire
-		// nft table -- on the router, some 17,000 set elements.
-		t.Logf("confirmed: procd is restarting gotun about every %.1fs and will keep doing so"+
-			" for as long as the device is missing, because `respawn 3600 5 0` has an"+
-			" unlimited retry count", 11.0/float64(second-first))
+		if now := o.servicePID(t, "gotun"); now != pid {
+			t.Errorf("the supervised pid changed %d -> %d, so the service is restarting", pid, now)
+		}
 	})
 
-	// And the recovery path, which is what makes the crash loop survivable
-	// rather than fatal: the device appearing is enough.
-	t.Run("it converges once the device appears", func(t *testing.T) {
-		o.sh(t, "ip link add xray0 type dummy && ip addr add 10.70.0.1/24 dev xray0"+
-			" && ip link set xray0 up")
-		o.poll(t, "table 100 to gain the tunnel route", 45*time.Second, func() (bool, string) {
-			out := o.sh(t, "ip route show table 100 2>&1")
-			return strings.Contains(out, "xray0"), out
-		})
-		// And the restarting stops, which is the other half of converging.
-		settled := o.applyFailures(t)
-		time.Sleep(7 * time.Second)
-		if now := o.applyFailures(t); now != settled {
-			t.Errorf("the initial apply is still failing after the device appeared"+
-				" (%d -> %d failures)", settled, now)
+	// The loud part. Degrading quietly would be worse than the loop: a gateway
+	// that classifies traffic into an empty table looks healthy from every
+	// direction except an egress-identity check.
+	t.Run("it says what it is doing", func(t *testing.T) {
+		log := o.sh(t, "grep -A1 'initial apply did not complete' /var/log/messages | head -4")
+		if !strings.Contains(log, "continuing anyway") {
+			t.Errorf("the degraded start is not explained in the log, so an operator reading"+
+				" syslog sees a failure and no statement of what the gateway is now doing:\n%s", log)
+		}
+		if !strings.Contains(log, "uplink") {
+			t.Errorf("the log does not say where traffic is going meanwhile:\n%s", log)
 		}
 	})
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/linux"
 	"github.com/legion/go-tun/internal/policy"
 	"github.com/legion/go-tun/internal/tunnelwatch"
@@ -74,6 +76,9 @@ func runWatch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := loadConfigInto(fs, *f.configPath, deployconf.WatchFlags); err != nil {
+		return err
+	}
 	o, err := f.options()
 	if err != nil {
 		return err
@@ -120,10 +125,35 @@ func Watch(o WatchOptions) error {
 
 	// Converge once up front, exactly as the old one-shot service did, so the
 	// box is in policy before the first probe interval elapses.
+	//
+	// A failure here used to be fatal, and that was the wrong call. At boot the
+	// usual cause is the tunnel device not existing yet -- gotun is START=99
+	// and sing-box is still coming up -- and watch exiting on that put procd
+	// into an unbounded respawn loop: a restart roughly every five seconds,
+	// rebuilding the whole nft table (some 17,000 set elements on the router)
+	// each time, for as long as the device stayed missing. Measured in the
+	// deploy lab.
+	//
+	// The loop it was refusing to enter is exactly what recovers from this. A
+	// probe against an absent device reads Unhealthy, transition() withdraws
+	// nothing it has not installed, and once the device appears repairDrift()
+	// notices table 100 has no route through it and re-applies. Meanwhile the
+	// classifier is already in place with an empty table 100, so marked
+	// traffic falls through to main and the house has plain internet.
+	//
+	// A ConfigError is different: it will fail identically forever, so carrying
+	// on would mean a loop nobody is watching. Those stay fatal.
 	initial := o.Apply
 	initial.TunnelUp = true
 	if err := Apply(initial); err != nil {
-		return fmt.Errorf("initial apply: %w", err)
+		var ce ConfigError
+		if errors.As(err, &ce) {
+			return fmt.Errorf("initial apply: %w", err)
+		}
+		lg.Printf("initial apply did not complete: %v", err)
+		lg.Printf("continuing anyway: the classifier is installed and table %d is empty,"+
+			" so marked traffic uses the uplink until the tunnel device appears",
+			policy.DefaultTableID)
 	}
 
 	apply := func(_ context.Context, up bool) error {
