@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"howett.net/plist"
+
 	"github.com/legion/go-tun/internal/ikev2"
 	"github.com/legion/go-tun/internal/policy"
 	"github.com/legion/go-tun/internal/prefixes"
@@ -198,36 +200,75 @@ func TestValidate_RejectsIncoherentVIPGeometry(t *testing.T) {
 	}
 }
 
+// vpnPayloadOf parses the profile and returns the VPN payload, so assertions
+// are about the document's structure rather than about the text that happens
+// to encode it. A string match passes just as happily on a key at the wrong
+// depth, which is the only bug this file has ever shipped.
+func vpnPayloadOf(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var profile struct {
+		PayloadContent []map[string]any `plist:"PayloadContent"`
+	}
+	if _, err := plist.Unmarshal(raw, &profile); err != nil {
+		t.Fatalf("not valid plist: %v", err)
+	}
+	for _, p := range profile.PayloadContent {
+		if p["PayloadType"] == "com.apple.vpn.managed" {
+			return p
+		}
+	}
+	t.Fatal("no VPN payload")
+	return nil
+}
+
 // The requirement, as configuration. On-Demand is not a kill switch unless the
 // profile makes it one, and the two ways to make it one are a single key apart
 // from the correct shape.
 func TestProfile_IsNotAKillSwitch(t *testing.T) {
-	b, err := ikev2.EncodeProfile(testConfig())
+	raw, err := ikev2.EncodeProfile(testConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
-
 	// Supervised Always-On blocks traffic when the tunnel is down.
-	if strings.Contains(got, "AlwaysOn") {
+	if strings.Contains(string(raw), "AlwaysOn") {
 		t.Error("profile must never be an Always-On VPN payload")
+	}
+
+	vpn := vpnPayloadOf(t, raw)
+	ike, ok := vpn["IKEv2"].(map[string]any)
+	if !ok {
+		t.Fatal("no IKEv2 dictionary")
+	}
+	// On-Demand belongs to the VPN-type dictionary. Current iOS also honours
+	// it at the payload root -- it was there and working -- but only this
+	// placement is in Apple's schema, and tolerance is not a contract.
+	if _, atRoot := vpn["OnDemandEnabled"]; atRoot {
+		t.Error("OnDemandEnabled is at the payload root rather than in IKEv2")
+	}
+	if ike["OnDemandEnabled"] != uint64(1) {
+		t.Errorf("on-demand must be enabled, got %v", ike["OnDemandEnabled"])
+	}
+
+	rules, _ := ike["OnDemandRules"].([]any)
+	if len(rules) == 0 {
+		t.Fatal("no on-demand rules")
 	}
 	// The last rule has to be a bare Disconnect: iOS takes the first match, so
 	// a catch-all anywhere else, or absent, leaves an unreachable gateway
 	// holding traffic instead of releasing it.
-	rules := strings.LastIndex(got, "<key>OnDemandRules</key>")
-	if rules < 0 {
-		t.Fatal("no OnDemandRules")
+	last, _ := rules[len(rules)-1].(map[string]any)
+	if last["Action"] != "Disconnect" || len(last) != 1 {
+		t.Errorf("the last rule must be an unconditional Disconnect, got %v", last)
 	}
-	tail := got[rules:]
-	if strings.LastIndex(tail, "Disconnect") < strings.LastIndex(tail, "Connect</string>") {
-		t.Error("the last on-demand rule must be a Disconnect catch-all")
+	var probed bool
+	for _, r := range rules {
+		m, _ := r.(map[string]any)
+		if m["Action"] == "Connect" && m["URLStringProbe"] != nil {
+			probed = true
+		}
 	}
-	if !strings.Contains(got, "<key>URLStringProbe</key>") {
+	if !probed {
 		t.Error("the Connect rule must be gated on a probe, or the phone sits in 'connecting'")
-	}
-	if !strings.Contains(got, "<key>OnDemandEnabled</key>\n\t\t\t<integer>1</integer>") {
-		t.Error("on-demand must be enabled, or the tunnel never comes back by itself")
 	}
 }
 
@@ -524,21 +565,20 @@ func TestValidate_RejectsAnUnreadableCA(t *testing.T) {
 func TestProfile_OnDemandCanBeShippedOff(t *testing.T) {
 	c := testConfig()
 	c.OnDemandDisabled = true
-	b, err := ikev2.EncodeProfile(c)
+	raw, err := ikev2.EncodeProfile(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
-	if !strings.Contains(got, "<key>OnDemandEnabled</key>\n\t\t\t<integer>0</integer>") {
-		t.Errorf("on-demand should be off:\n%s", got)
+	ike, _ := vpnPayloadOf(t, raw)["IKEv2"].(map[string]any)
+	if ike["OnDemandEnabled"] != uint64(0) {
+		t.Errorf("on-demand should be off, got %v", ike["OnDemandEnabled"])
 	}
 	// Omitted rather than present-but-inert: a rule list that is not being
 	// evaluated is the kind of thing somebody later reads as the behaviour.
-	if strings.Contains(got, "OnDemandRules") {
+	if _, ok := ike["OnDemandRules"]; ok {
 		t.Error("the rules should not be emitted when on-demand is off")
 	}
-	// ...and the tunnel itself must still be fully configured.
-	if !strings.Contains(got, "com.apple.vpn.managed") || !strings.Contains(got, "IKEv2") {
+	if ike["RemoteAddress"] == nil {
 		t.Error("the VPN payload went missing")
 	}
 }
@@ -551,38 +591,35 @@ func TestProfile_OnDemandCanBeShippedOff(t *testing.T) {
 func TestProfile_DNSMatchDomainsDecideWhetherTheResolverIsUsedAtAll(t *testing.T) {
 	c := testConfig()
 	c.DNSMatchDomains = []string{""}
-	b, err := ikev2.EncodeProfile(c)
+	raw, err := ikev2.EncodeProfile(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
+	vpn := vpnPayloadOf(t, raw)
 
-	if !strings.Contains(got, "<key>DNS</key>") {
-		t.Fatalf("no DNS settings:\n%s", got)
-	}
 	// Placement, not just presence. Apple puts DNS at the payload level
 	// because it applies to every VPN type, and iOS silently ignores an
 	// unknown key nested inside the IKEv2 dictionary -- a profile with it in
 	// the wrong place installs cleanly, looks right and changes nothing. That
 	// is how this shipped once.
-	if indentOf(t, got, "<key>DNS</key>") != indentOf(t, got, "<key>IKEv2</key>") {
-		t.Errorf("DNS must be a sibling of IKEv2, not nested inside it:\n%s", got)
+	dns, ok := vpn["DNS"].(map[string]any)
+	if !ok {
+		t.Fatalf("no DNS dictionary at the payload level: %v", vpn)
 	}
-	if !strings.Contains(got, "<string>"+c.VIPGateway.String()+"</string>") {
-		t.Error("the resolver address is not the one the pool pushes")
+	if ike, _ := vpn["IKEv2"].(map[string]any); ike["DNS"] != nil {
+		t.Error("DNS must not also be nested inside IKEv2")
 	}
-	// The empty string is the documented way to match every domain, and it has
-	// to survive serialisation as an actually-empty element: <string></string>,
-	// not a self-closed or whitespace-bearing one.
-	i := strings.Index(got, "<key>SupplementalMatchDomains</key>")
-	if i < 0 {
-		t.Fatal("no SupplementalMatchDomains")
+
+	addrs, _ := dns["ServerAddresses"].([]any)
+	if len(addrs) != 1 || addrs[0] != c.VIPGateway.String() {
+		t.Errorf("the resolver is not the one the pool pushes: %v", dns["ServerAddresses"])
 	}
-	window := got[i:min(len(got), i+200)]
-	if !strings.Contains(window, "<string></string>") {
-		t.Errorf("the match-all empty string did not survive:\n%s", window)
+	// The empty string is the documented way to match every domain.
+	match, _ := dns["SupplementalMatchDomains"].([]any)
+	if len(match) != 1 || match[0] != "" {
+		t.Errorf("the match-all empty string did not survive: %#v", match)
 	}
-	if !strings.Contains(got, "<key>SupplementalMatchDomainsNoSearch</key>") {
+	if dns["SupplementalMatchDomainsNoSearch"] != uint64(1) {
 		t.Error("an empty search domain would be meaningless; it must be suppressed")
 	}
 }
@@ -592,18 +629,19 @@ func TestProfile_DNSMatchDomainsDecideWhetherTheResolverIsUsedAtAll(t *testing.T
 func TestProfile_DNSMatchCanBeNarrowedToDomains(t *testing.T) {
 	c := testConfig()
 	c.DNSMatchDomains = []string{"ru", "lan"}
-	b, err := ikev2.EncodeProfile(c)
+	raw, err := ikev2.EncodeProfile(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
-	for _, d := range []string{"<string>ru</string>", "<string>lan</string>"} {
-		if !strings.Contains(got, d) {
-			t.Errorf("missing %s", d)
-		}
+	dns, _ := vpnPayloadOf(t, raw)["DNS"].(map[string]any)
+	match, _ := dns["SupplementalMatchDomains"].([]any)
+	if len(match) != 2 || match[0] != "ru" || match[1] != "lan" {
+		t.Errorf("match domains: %#v", match)
 	}
-	if strings.Contains(got, "<string></string>") {
-		t.Error("a narrowed list must not also match everything")
+	for _, d := range match {
+		if d == "" {
+			t.Error("a narrowed list must not also match everything")
+		}
 	}
 }
 
@@ -612,24 +650,11 @@ func TestProfile_DNSMatchCanBeNarrowedToDomains(t *testing.T) {
 func TestProfile_DNSSettingsCanBeOmitted(t *testing.T) {
 	c := testConfig()
 	c.DNSMatchDomains = nil
-	b, err := ikev2.EncodeProfile(c)
+	raw, err := ikev2.EncodeProfile(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "<key>DNS</key>") {
+	if _, ok := vpnPayloadOf(t, raw)["DNS"]; ok {
 		t.Error("no DNS settings were asked for")
 	}
-}
-
-// indentOf reports how many tabs precede a line, which is how the structural
-// placement of a key is checked without pulling in a plist parser.
-func indentOf(t *testing.T, doc, key string) int {
-	t.Helper()
-	for _, line := range strings.Split(doc, "\n") {
-		if strings.TrimSpace(line) == key {
-			return len(line) - len(strings.TrimLeft(line, "\t"))
-		}
-	}
-	t.Fatalf("%s not found", key)
-	return -1
 }

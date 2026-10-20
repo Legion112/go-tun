@@ -1,12 +1,11 @@
 package ikev2
 
 import (
-	"bytes"
 	"crypto/sha1"
-	"encoding/base64"
-	"encoding/xml"
 	"fmt"
 	"strings"
+
+	"howett.net/plist"
 )
 
 // uuidNamespace is a fixed namespace for name-based UUIDs. Its value is
@@ -35,6 +34,119 @@ func deterministicUUID(name string) string {
 	return fmt.Sprintf("%X-%X-%X-%X-%X", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
+// The types below mirror Apple's published payload schema, which is vendored
+// under testdata/schema and checked against in
+// TestProfile_ConformsToApplesPublishedSchema.
+//
+// Typed rather than hand-written XML because the one class of bug this file
+// has actually produced is a key in the wrong place: a dictionary nested one
+// level too deep is an unknown key, which iOS ignores in silence, so the
+// profile installs cleanly, looks right and changes nothing. A struct cannot
+// put DNS inside IKEv2 without someone writing it there on purpose, and the
+// schema test catches it even then.
+//
+// Field order is not meaningful: a plist dict is a dictionary, and the
+// marshaller sorts keys. Nesting is what matters.
+
+type profileRoot struct {
+	PayloadContent           []any  `plist:"PayloadContent"`
+	PayloadDisplayName       string `plist:"PayloadDisplayName"`
+	PayloadIdentifier        string `plist:"PayloadIdentifier"`
+	PayloadOrganization      string `plist:"PayloadOrganization"`
+	PayloadRemovalDisallowed bool   `plist:"PayloadRemovalDisallowed"`
+	PayloadType              string `plist:"PayloadType"`
+	PayloadUUID              string `plist:"PayloadUUID"`
+	PayloadVersion           int    `plist:"PayloadVersion"`
+}
+
+type vpnPayload struct {
+	PayloadType        string        `plist:"PayloadType"`
+	PayloadVersion     int           `plist:"PayloadVersion"`
+	PayloadIdentifier  string        `plist:"PayloadIdentifier"`
+	PayloadUUID        string        `plist:"PayloadUUID"`
+	PayloadDisplayName string        `plist:"PayloadDisplayName"`
+	UserDefinedName    string        `plist:"UserDefinedName"`
+	VPNType            string        `plist:"VPNType"`
+	IKEv2              ikev2Settings `plist:"IKEv2"`
+	// A SIBLING of IKEv2, because Apple's schema puts it at the payload level:
+	// it applies to every VPN type. Nested inside IKEv2 it is an unknown key
+	// and iOS ignores it, which is how a profile once shipped with the
+	// resolver configured and never used.
+	DNS *dnsSettings `plist:"DNS,omitempty"`
+}
+
+type ikev2Settings struct {
+	RemoteAddress    string `plist:"RemoteAddress"`
+	RemoteIdentifier string `plist:"RemoteIdentifier"`
+	LocalIdentifier  string `plist:"LocalIdentifier"`
+	// AuthenticationMethod None plus ExtendedAuthEnabled is EAP: the gateway
+	// proves itself with a certificate, the phone with a username and
+	// password. No AuthPassword: a profile carrying it is a credential in a
+	// file that gets AirDropped to a phone and then sits in Downloads, and iOS
+	// keeps the password in the keychain after the first connect anyway.
+	AuthenticationMethod string `plist:"AuthenticationMethod"`
+	ExtendedAuthEnabled  int    `plist:"ExtendedAuthEnabled"`
+	AuthName             string `plist:"AuthName"`
+	// This is also the fail-open latency: nothing re-evaluates an On-Demand
+	// rule while the SA is alive, so a tunnel that dies mid-session is noticed
+	// by DPD and traffic is held until then.
+	DeadPeerDetectionRate string `plist:"DeadPeerDetectionRate"`
+	DisableMOBIKE         int    `plist:"DisableMOBIKE"`
+	DisableRedirect       int    `plist:"DisableRedirect"`
+	EnablePFS             int    `plist:"EnablePFS"`
+
+	EnableCertificateRevocationCheck int `plist:"EnableCertificateRevocationCheck"`
+	// The two keys that are the whole battery argument: the NAT keepalive is
+	// handed to hardware, so the application processor does not wake to send
+	// it while the phone sleeps. A WireGuard NetworkExtension cannot have
+	// this; its keepalive is a userspace timer.
+	NATKeepAliveOffloadEnable int `plist:"NATKeepAliveOffloadEnable"`
+	NATKeepAliveInterval      int `plist:"NATKeepAliveInterval"`
+
+	// On-Demand belongs to the VPN-type dictionary, not the payload root.
+	// Both placements are accepted by current iOS, but only this one is in the
+	// schema, and relying on tolerance is how a configuration stops working at
+	// an OS upgrade with nothing to point at.
+	OnDemandEnabled int            `plist:"OnDemandEnabled"`
+	OnDemandRules   []onDemandRule `plist:"OnDemandRules,omitempty"`
+}
+
+// dnsSettings is what makes the pushed resolver one the phone actually uses.
+//
+// A split tunnel is not the network's default route, so iOS treats the
+// tunnel's DNS servers as supplemental: consulted only for the domains listed
+// here. With no list, nothing matches and not one query arrives.
+type dnsSettings struct {
+	ServerAddresses []string `plist:"ServerAddresses"`
+	// The single empty string is the documented way to say "every domain": it
+	// becomes the default domain, so all queries go to the tunnel's resolver
+	// first.
+	SupplementalMatchDomains []string `plist:"SupplementalMatchDomains"`
+	// Not appended to the search list. An empty search domain is meaningless,
+	// and a real one would start completing bare hostnames unasked.
+	SupplementalMatchDomainsNoSearch int `plist:"SupplementalMatchDomainsNoSearch"`
+}
+
+type onDemandRule struct {
+	Action             string   `plist:"Action"`
+	InterfaceTypeMatch string   `plist:"InterfaceTypeMatch,omitempty"`
+	SSIDMatch          []string `plist:"SSIDMatch,omitempty"`
+	URLStringProbe     string   `plist:"URLStringProbe,omitempty"`
+}
+
+type certPayload struct {
+	PayloadType                string `plist:"PayloadType"`
+	PayloadVersion             int    `plist:"PayloadVersion"`
+	PayloadIdentifier          string `plist:"PayloadIdentifier"`
+	PayloadUUID                string `plist:"PayloadUUID"`
+	PayloadDisplayName         string `plist:"PayloadDisplayName"`
+	PayloadCertificateFileName string `plist:"PayloadCertificateFileName"`
+	// DER, not PEM. Handing Apple a PEM block produces a profile that installs
+	// and then validates nothing, which reads as a problem with the CA rather
+	// than with the encoding.
+	PayloadContent []byte `plist:"PayloadContent"`
+}
+
 // EncodeProfile builds the .mobileconfig an iPhone installs.
 //
 // What is deliberately absent matters as much as what is present:
@@ -42,10 +154,7 @@ func deterministicUUID(name string) string {
 //   - **No VPNType AlwaysOn.** Supervised Always-On VPN blocks traffic when the
 //     tunnel is down. That is the opposite of the requirement, and it is a
 //     single key away.
-//   - **No AuthPassword.** A profile carrying the EAP password is a credential
-//     in a file that gets AirDropped or emailed to a phone and then sits in
-//     Downloads. iOS stores the password in the keychain after the first manual
-//     connect, so On-Demand works unattended from then on without it.
+//   - **No AuthPassword.** See ikev2Settings.
 //   - **No routes.** There is no key for them. Routing comes entirely from the
 //     traffic selectors the gateway narrows to, which is why Config.Selectors
 //     is the single source of truth and why this function cannot contradict it.
@@ -68,117 +177,53 @@ func EncodeProfile(c Config) ([]byte, error) {
 	}
 	vpnID := profileID + ".vpn"
 
-	p := &plist{}
-	p.header()
-	p.openDict(0) // root
-
-	p.key(1, "PayloadContent")
-	p.raw(1, "<array>")
-	p.openDict(2) // the VPN payload
-
-	p.str(3, "PayloadType", "com.apple.vpn.managed")
-	p.num(3, "PayloadVersion", 1)
-	p.str(3, "PayloadIdentifier", vpnID)
-	p.str(3, "PayloadUUID", deterministicUUID(vpnID))
-	p.str(3, "PayloadDisplayName", c.ProfileName)
-	p.str(3, "UserDefinedName", c.ProfileName)
-	p.str(3, "VPNType", "IKEv2")
-
-	p.key(3, "IKEv2")
-	p.openDict(3)
-	p.str(4, "RemoteAddress", c.Server)
-	// RemoteIdentifier must equal a subjectAltName on the gateway certificate.
-	// iOS authenticates the server and then checks this separately, so a
-	// mismatch fails after a successful handshake -- which reads as a crypto
-	// problem rather than a naming one.
-	p.str(4, "RemoteIdentifier", c.GatewayID)
-	p.str(4, "LocalIdentifier", c.ClientID)
-	// AuthenticationMethod None plus ExtendedAuthEnabled is EAP: the gateway
-	// proves itself with a certificate, the phone with a username and
-	// password. Certificate client auth would need a second payload carrying a
-	// PKCS#12, which this tool does not generate for the same reason it does
-	// not generate the password.
-	p.str(4, "AuthenticationMethod", "None")
-	p.num(4, "ExtendedAuthEnabled", 1)
-	p.str(4, "AuthName", c.ClientID)
-	p.str(4, "DeadPeerDetectionRate", c.DPDRate)
-	p.num(4, "DisableMOBIKE", 0)
-	p.num(4, "DisableRedirect", 0)
-	p.num(4, "EnablePFS", 1)
-	p.num(4, "EnableCertificateRevocationCheck", 0)
-	// The two keys that are the whole battery argument: the NAT keepalive is
-	// handed to hardware, so the application processor does not wake to send
-	// it while the phone sleeps. A WireGuard NetworkExtension cannot have
-	// this; its keepalive is a userspace timer.
-	p.num(4, "NATKeepAliveOffloadEnable", 1)
-	p.num(4, "NATKeepAliveInterval", c.KeepAliveInterval)
-	p.closeDict(3)
-
-	// A SIBLING of IKEv2, not a key inside it. Apple's schema puts DNS at the
-	// payload level because it applies to every VPN type, and iOS silently
-	// ignores an unknown key nested in the IKEv2 dictionary -- so getting this
-	// wrong produces a profile that installs cleanly, looks right, and changes
-	// nothing. Measured: zero queries arrived while it was nested.
-	//
-	// Without it the resolver this gateway pushes is configured and never
-	// used. A split tunnel is not the network's default route, so iOS treats
-	// the tunnel's DNS servers as supplemental, consulted only for the domains
-	// listed here.
-	if len(c.DNSMatchDomains) > 0 {
-		p.key(3, "DNS")
-		p.openDict(3)
-		p.key(4, "ServerAddresses")
-		p.raw(4, "<array>")
-		p.raw(5, "<string>"+escape(c.VIPGateway.String())+"</string>")
-		p.raw(4, "</array>")
-		p.key(4, "SupplementalMatchDomains")
-		p.raw(4, "<array>")
-		for _, d := range c.DNSMatchDomains {
-			// The empty string is deliberate and load-bearing: it is the
-			// documented way to match every domain.
-			p.raw(5, "<string>"+escape(d)+"</string>")
-		}
-		p.raw(4, "</array>")
-		// Not appended to the search list. An empty search domain is
-		// meaningless, and a real one would start completing bare hostnames in
-		// a way nobody asked for.
-		p.num(4, "SupplementalMatchDomainsNoSearch", 1)
-		p.closeDict(3)
+	vpn := vpnPayload{
+		PayloadType:        "com.apple.vpn.managed",
+		PayloadVersion:     1,
+		PayloadIdentifier:  vpnID,
+		PayloadUUID:        deterministicUUID(vpnID),
+		PayloadDisplayName: c.ProfileName,
+		UserDefinedName:    c.ProfileName,
+		VPNType:            "IKEv2",
+		IKEv2: ikev2Settings{
+			RemoteAddress: c.Server,
+			// Must equal a subjectAltName on the gateway certificate. iOS
+			// authenticates the server and then checks this separately, so a
+			// mismatch fails after a successful handshake -- which reads as a
+			// crypto problem rather than a naming one.
+			RemoteIdentifier:                 c.GatewayID,
+			LocalIdentifier:                  c.ClientID,
+			AuthenticationMethod:             "None",
+			ExtendedAuthEnabled:              1,
+			AuthName:                         c.ClientID,
+			DeadPeerDetectionRate:            c.DPDRate,
+			DisableMOBIKE:                    0,
+			DisableRedirect:                  0,
+			EnablePFS:                        1,
+			EnableCertificateRevocationCheck: 0,
+			NATKeepAliveOffloadEnable:        1,
+			NATKeepAliveInterval:             c.KeepAliveInterval,
+		},
 	}
 
 	// Connected by hand when on-demand is off, and the rules are omitted
 	// entirely rather than left present-but-inert: a rule list that is not
 	// being evaluated is the kind of thing somebody later reads as the
 	// behaviour and is wrong about.
-	if c.OnDemandDisabled {
-		p.num(3, "OnDemandEnabled", 0)
-	} else {
-		p.num(3, "OnDemandEnabled", 1)
-		p.key(3, "OnDemandRules")
-		p.raw(3, "<array>")
-		for _, r := range onDemandRules(c) {
-			p.openDict(4)
-			p.str(5, "Action", r.action)
-			if r.interfaceType != "" {
-				p.str(5, "InterfaceTypeMatch", r.interfaceType)
-			}
-			if len(r.ssids) > 0 {
-				p.key(5, "SSIDMatch")
-				p.raw(5, "<array>")
-				for _, s := range r.ssids {
-					p.raw(6, "<string>"+escape(s)+"</string>")
-				}
-				p.raw(5, "</array>")
-			}
-			if r.urlProbe != "" {
-				p.str(5, "URLStringProbe", r.urlProbe)
-			}
-			p.closeDict(4)
-		}
-		p.raw(3, "</array>")
+	if !c.OnDemandDisabled {
+		vpn.IKEv2.OnDemandEnabled = 1
+		vpn.IKEv2.OnDemandRules = onDemandRules(c)
 	}
 
-	p.closeDict(2) // VPN payload
+	if len(c.DNSMatchDomains) > 0 {
+		vpn.DNS = &dnsSettings{
+			ServerAddresses:                  []string{c.VIPGateway.String()},
+			SupplementalMatchDomains:         c.DNSMatchDomains,
+			SupplementalMatchDomainsNoSearch: 1,
+		}
+	}
+
+	content := []any{vpn}
 
 	// The root that signed the gateway's certificate, delivered in the same
 	// profile so it is trusted for it. Without this a self-signed gateway is
@@ -189,38 +234,27 @@ func EncodeProfile(c Config) ([]byte, error) {
 			return nil, err
 		}
 		caID := profileID + ".ca"
-		p.openDict(2)
-		p.str(3, "PayloadType", "com.apple.security.root")
-		p.num(3, "PayloadVersion", 1)
-		p.str(3, "PayloadIdentifier", caID)
-		p.str(3, "PayloadUUID", deterministicUUID(caID))
-		p.str(3, "PayloadDisplayName", c.ProfileName+" CA")
-		p.str(3, "PayloadCertificateFileName", "gotun-ca.crt")
-		// Apple's certificate payloads carry DER, base64-encoded.
-		p.data(3, "PayloadContent", der)
-		p.closeDict(2)
+		content = append(content, certPayload{
+			PayloadType:                "com.apple.security.root",
+			PayloadVersion:             1,
+			PayloadIdentifier:          caID,
+			PayloadUUID:                deterministicUUID(caID),
+			PayloadDisplayName:         c.ProfileName + " CA",
+			PayloadCertificateFileName: "gotun-ca.crt",
+			PayloadContent:             der,
+		})
 	}
 
-	p.raw(1, "</array>")
-
-	p.str(1, "PayloadType", "Configuration")
-	p.num(1, "PayloadVersion", 1)
-	p.str(1, "PayloadIdentifier", profileID)
-	p.str(1, "PayloadUUID", deterministicUUID(profileID))
-	p.str(1, "PayloadDisplayName", c.ProfileName)
-	p.str(1, "PayloadOrganization", "gotun")
-	p.bool(1, "PayloadRemovalDisallowed", false)
-
-	p.closeDict(0)
-	p.footer()
-	return p.bytes(), nil
-}
-
-type onDemandRule struct {
-	action        string
-	interfaceType string
-	ssids         []string
-	urlProbe      string
+	return plist.MarshalIndent(profileRoot{
+		PayloadContent:           content,
+		PayloadDisplayName:       c.ProfileName,
+		PayloadIdentifier:        profileID,
+		PayloadOrganization:      "gotun",
+		PayloadRemovalDisallowed: false,
+		PayloadType:              "Configuration",
+		PayloadUUID:              deterministicUUID(profileID),
+		PayloadVersion:           1,
+	}, plist.XMLFormat, "\t")
 }
 
 // onDemandRules builds the ordered rule list that makes a dead tunnel degrade
@@ -240,26 +274,27 @@ func onDemandRules(c Config) []onDemandRule {
 	var rules []onDemandRule
 
 	// At home the tunnel would hairpin out to the gateway's public address and
-	// back in through the same uplink it exits from, across two layers of NAT
-	// whose loopback handling is not something to rely on.
+	// back in through the same uplink it exits from, across NAT whose loopback
+	// handling is not something to rely on -- measured absent on the deployed
+	// upstream.
 	if len(c.HomeSSIDs) > 0 {
 		rules = append(rules, onDemandRule{
-			action:        "Disconnect",
-			interfaceType: "WiFi",
-			ssids:         c.HomeSSIDs,
+			Action:             "Disconnect",
+			InterfaceTypeMatch: "WiFi",
+			SSIDMatch:          c.HomeSSIDs,
 		})
 	}
 
 	rules = append(rules, onDemandRule{
-		action:   "Connect",
-		urlProbe: strings.TrimSpace(c.ProbeURL),
+		Action:         "Connect",
+		URLStringProbe: strings.TrimSpace(c.ProbeURL),
 	})
 
 	// Unreachable when there is no probe, since the Connect above then matches
 	// everything. Emitted regardless, because a profile whose last rule is not
 	// a catch-all Disconnect is one edit away from being a kill switch, and
 	// the shape should be visible in every version of the file.
-	rules = append(rules, onDemandRule{action: "Disconnect"})
+	rules = append(rules, onDemandRule{Action: "Disconnect"})
 	return rules
 }
 
@@ -279,76 +314,3 @@ func sanitizeID(s string) string {
 	}
 	return out
 }
-
-func escape(s string) string {
-	var buf bytes.Buffer
-	_ = xml.EscapeText(&buf, []byte(s))
-	return buf.String()
-}
-
-// plist is a minimal indentation-aware writer.
-//
-// Hand-rolled rather than encoding/xml with structs because a plist dict is an
-// ordered sequence of alternating key and value elements, which Go's XML
-// encoder cannot express without a custom marshaller per dict -- more code, and
-// harder to read against Apple's own documentation.
-type plist struct{ b bytes.Buffer }
-
-func (p *plist) header() {
-	p.b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	p.b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	p.b.WriteString(`<plist version="1.0">` + "\n")
-}
-
-func (p *plist) footer() { p.b.WriteString("</plist>\n") }
-
-func (p *plist) indent(n int) { p.b.WriteString(strings.Repeat("\t", n)) }
-
-func (p *plist) raw(n int, s string) {
-	p.indent(n)
-	p.b.WriteString(s + "\n")
-}
-
-// openDict emits the dict element at indent n; its keys belong at n+1.
-func (p *plist) openDict(n int)  { p.raw(n, "<dict>") }
-func (p *plist) closeDict(n int) { p.raw(n, "</dict>") }
-
-func (p *plist) key(n int, k string) { p.raw(n, "<key>"+escape(k)+"</key>") }
-
-func (p *plist) str(n int, k, v string) {
-	p.key(n, k)
-	p.raw(n, "<string>"+escape(v)+"</string>")
-}
-
-func (p *plist) num(n int, k string, v int) {
-	p.key(n, k)
-	p.raw(n, fmt.Sprintf("<integer>%d</integer>", v))
-}
-
-// data emits a <data> element, wrapped the way Apple's own profiles are so a
-// long certificate stays readable.
-func (p *plist) data(n int, k string, v []byte) {
-	p.key(n, k)
-	p.raw(n, "<data>")
-	enc := base64.StdEncoding.EncodeToString(v)
-	for len(enc) > 0 {
-		chunk := enc
-		if len(chunk) > 64 {
-			chunk = chunk[:64]
-		}
-		p.raw(n+1, chunk)
-		enc = enc[len(chunk):]
-	}
-	p.raw(n, "</data>")
-}
-
-func (p *plist) bool(n int, k string, v bool) {
-	p.key(n, k)
-	if v {
-		p.raw(n, "<true/>")
-		return
-	}
-	p.raw(n, "<false/>")
-}
-
-func (p *plist) bytes() []byte { return p.b.Bytes() }
