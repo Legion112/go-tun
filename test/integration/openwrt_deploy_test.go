@@ -723,19 +723,51 @@ func TestOpenWrtHotplug(t *testing.T) {
 		}
 	})
 
-	// Without this gate the hook re-arms the policy on any ifup, including one
-	// done while debugging a dead tunnel -- which is how it once put every LAN
-	// client back onto a broken path after the operator had torn the policy
-	// down deliberately.
-	t.Run("a disabled service is left alone", func(t *testing.T) {
+	// A service that is not running is left alone, whether it was disabled or
+	// merely stopped. Without that, the hook re-arms the policy on any ifup --
+	// including one done while debugging a dead tunnel, which is how it once
+	// put every LAN client back onto a broken path after the operator had torn
+	// the policy down deliberately.
+	//
+	// The question it asks has changed and is now the right one. The shell
+	// version checked `/etc/init.d/gotun enabled`, which means "starts at
+	// boot": a deliberately stopped service is still enabled, so that gate
+	// missed the case it was written for and TestOpenWrtHotplugDoesNotRevive
+	// had to cover it separately. `gotun hotplug` looks for a running watcher
+	// instead, which answers both.
+	t.Run("a service that is not running is left alone", func(t *testing.T) {
 		o.sh(t, "/etc/init.d/gotun stop && /etc/init.d/gotun disable")
 		t.Cleanup(func() { o.sh(t, "/etc/init.d/gotun enable") })
 		o.clearSyslog(t)
 
 		o.sh(t, ifup("xray0"))
 		if out := o.sh(t, "grep -c 'reapplying policy' /var/log/messages"); strings.TrimSpace(out) != "0" {
-			t.Errorf("the hook fired for a disabled service (%q matches)", out)
+			t.Errorf("the hook fired with no watcher running (%q matches)", out)
 		}
+	})
+
+	// The other direction, and a deliberate change. A running service that
+	// happens to be disabled is still doing its job, and an ifup of its tunnel
+	// still needs the route put back -- `disable` only governs the next boot.
+	// The old `enabled` gate refused here, which was wrong in a way nobody
+	// would have noticed until a route failed to come back after a bounce on a
+	// box someone had disabled for the next reboot.
+	t.Run("a running service is re-applied even when disabled", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun disable && /etc/init.d/gotun start")
+		t.Cleanup(func() { o.sh(t, "/etc/init.d/gotun enable") })
+		o.waitServicePID(t, "gotun")
+		o.poll(t, "the policy to be installed", 30*time.Second, func() (bool, string) {
+			out := o.sh(t, "ip route show table 100")
+			return strings.Contains(out, "xray0"), out
+		})
+
+		o.sh(t, "ip route flush table 100")
+		o.clearSyslog(t)
+		o.sh(t, ifup("xray0"))
+		o.poll(t, "the route to come back", 20*time.Second, func() (bool, string) {
+			out := o.sh(t, "ip route show table 100")
+			return strings.Contains(out, "xray0"), out
+		})
 	})
 }
 

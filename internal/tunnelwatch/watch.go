@@ -81,6 +81,11 @@ type Watcher struct {
 	// writer and the readers only ever want the newest value.
 	snap atomic.Pointer[Snapshot]
 
+	// poke asks the loop to re-assert the policy out of band. Buffered to one
+	// and written without blocking: several requests arriving together are one
+	// request, and nothing may stall waiting for the loop.
+	poke chan struct{}
+
 	tunnelUp        bool
 	consecutiveFail int
 	consecutiveOK   int
@@ -97,6 +102,7 @@ func New(r linux.Runner, p Prober, apply Applier, cfg Config, lg *log.Logger) *W
 		cfg: cfg, r: r, p: p, apply: apply, log: lg,
 		now:      time.Now,
 		tunnelUp: true,
+		poke:     make(chan struct{}, 1),
 	}
 	// Published before the first probe, so a reader arriving in the gap sees
 	// the same belief the initial apply installed rather than a zero value --
@@ -254,6 +260,37 @@ func (w *Watcher) maybeBounce() {
 	w.lastBounce = now
 }
 
+// Reapply asks the loop to re-assert the policy now, rather than at the next
+// tick. It never blocks and may be called from any goroutine -- the Watcher
+// itself is single-threaded, so the request is handed to the loop and the loop
+// does the work. That is deliberate: a second apply running concurrently with
+// the watchdog's own is the class of bug this layer already has.
+//
+// It is what an ifup of the tunnel device triggers. Without it the policy comes
+// back at the next tick instead, up to a whole interval later, during which the
+// gateway is a classifier marking traffic into an empty table -- healthy from
+// every direction except an egress-identity check.
+func (w *Watcher) Reapply() {
+	select {
+	case w.poke <- struct{}{}:
+	default: // one already pending; it will do the same work
+	}
+}
+
+// reassert re-applies at the current belief, without probing.
+//
+// Not a Tick, and the difference matters. A poke means a device the policy
+// depends on has just changed, so what is wanted is the policy put back the way
+// the loop already believes it should be. Probing instead would ask a question
+// nobody asked -- and would get the wrong answer whenever the device is up but
+// not yet carrying traffic, which is precisely the moment an ifup fires.
+func (w *Watcher) reassert(ctx context.Context) {
+	w.log.Printf("re-asserting policy on request, tunnel-up=%v", w.tunnelUp)
+	if err := w.apply(ctx, w.tunnelUp); err != nil {
+		w.log.Printf("re-assert failed, the next tick will retry: %v", err)
+	}
+}
+
 // Run ticks until the context is cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
 	w.log.Printf("watching %s via %s every %s; declaring dead after %d consecutive failures",
@@ -266,6 +303,8 @@ func (w *Watcher) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			w.Tick(ctx)
+		case <-w.poke:
+			w.reassert(ctx)
 		}
 	}
 }

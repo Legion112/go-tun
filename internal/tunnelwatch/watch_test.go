@@ -214,3 +214,123 @@ func TestWatch_ProbeTargetsTheTunnelDevice(t *testing.T) {
 		t.Fatalf("probe must be bound to the tunnel interface, got %v", p.calls)
 	}
 }
+
+// --- Reapply -----------------------------------------------------------------
+
+// A poke must re-apply without probing.
+//
+// The distinction is the whole point. A poke means a device the policy depends
+// on has just changed -- an ifup of the tunnel -- so what is wanted is the
+// policy put back the way the loop already believes it should be. Probing
+// instead would ask a question nobody asked, and would get the wrong answer at
+// exactly the moment an ifup fires: the device is up but not yet carrying
+// traffic.
+func TestWatch_ReapplyDoesNotProbe(t *testing.T) {
+	a := &applyLog{}
+	p := &fakeProbe{}
+	w := newWatcher(upRunner(), p, a, tunnelwatch.Config{Interval: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	w.Reapply()
+	waitFor(t, func() bool { return len(a.ups) == 1 })
+
+	cancel()
+	<-done
+
+	if len(p.calls) != 0 {
+		t.Errorf("Reapply probed %v; it must re-assert the current belief, not re-decide it",
+			p.calls)
+	}
+	if len(a.ups) != 1 || !a.ups[0] {
+		t.Errorf("applies were %v, want exactly one at tunnel-up=true", a.ups)
+	}
+}
+
+// The belief is re-asserted, not reset. A poke arriving while the route is
+// withdrawn must not quietly restore it: the tunnel is still dead, and putting
+// traffic back into it is the outage this watchdog exists to prevent.
+func TestWatch_ReapplyKeepsAWithdrawnRouteWithdrawn(t *testing.T) {
+	a := &applyLog{}
+	r := upRunner()
+	r.Errors["ip link show dev xray0"] = errors.New(`Cannot find device "xray0"`)
+	w := newWatcher(r, &fakeProbe{}, a, tunnelwatch.Config{FailAfter: 1, Interval: time.Hour})
+
+	// One tick with the device absent withdraws the route.
+	w.Tick(context.Background())
+	if len(a.ups) != 1 || a.ups[0] {
+		t.Fatalf("precondition: want one apply at tunnel-up=false, got %v", a.ups)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+	w.Reapply()
+	waitFor(t, func() bool { return len(a.ups) == 2 })
+	cancel()
+	<-done
+
+	if a.ups[1] {
+		t.Error("the poke re-applied at tunnel-up=true while the tunnel was known dead," +
+			" putting traffic back into a tunnel that swallows it")
+	}
+}
+
+// Several ifups arriving together are one request. Without this a flapping
+// interface would queue a re-apply per event and the loop would spend its time
+// rebuilding the ruleset.
+func TestWatch_ReapplyCoalesces(t *testing.T) {
+	a := &applyLog{}
+	w := newWatcher(upRunner(), &fakeProbe{}, a, tunnelwatch.Config{Interval: time.Hour})
+
+	// Nothing is reading the channel yet, so these all land on a buffer of one.
+	for i := 0; i < 50; i++ {
+		w.Reapply()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return len(a.ups) >= 1 })
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if len(a.ups) != 1 {
+		t.Errorf("50 pokes produced %d applies, want 1", len(a.ups))
+	}
+}
+
+// Reapply must never block, whatever the loop is doing -- a hotplug handler
+// waiting on a busy watchdog is a netifd event handler that does not return.
+func TestWatch_ReapplyNeverBlocks(t *testing.T) {
+	a := &applyLog{}
+	w := newWatcher(upRunner(), &fakeProbe{}, a, tunnelwatch.Config{Interval: time.Hour})
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			w.Reapply() // no loop running at all: the buffer fills and stays full
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reapply blocked with no loop running")
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the loop to act")
+}

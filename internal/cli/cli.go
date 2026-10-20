@@ -13,7 +13,7 @@ import (
 // Run dispatches gotun subcommands.
 func Run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gotun <fetch|amnezia|ikev2|apply|check|watch|clear>")
+		return fmt.Errorf("usage: gotun <fetch|amnezia|ikev2|apply|check|watch|hotplug|clear>")
 	}
 	switch args[0] {
 	case "fetch":
@@ -28,6 +28,8 @@ func Run(args []string) error {
 		return runCheck(args[1:])
 	case "watch":
 		return runWatch(args[1:])
+	case "hotplug":
+		return runHotplug(args[1:])
 	case "clear":
 		return runClear(args[1:])
 	default:

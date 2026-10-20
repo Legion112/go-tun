@@ -33,6 +33,7 @@ type watchFlags struct {
 	cooldown      *time.Duration
 	healthListen  *string
 	bounceAfter   *time.Duration
+	pidFile       *string
 }
 
 func registerWatchFlags(fs *flag.FlagSet) (*applyFlags, *watchFlags) {
@@ -54,6 +55,9 @@ func registerWatchFlags(fs *flag.FlagSet) (*applyFlags, *watchFlags) {
 				" published through the NATs in front of the gateway, it turns a dead exit hop into a"+
 				" VPN icon that is visibly off instead of a silent fallback to the local uplink."+
 				" The body says only up or down, because strangers can read it"),
+		pidFile: fs.String("pidfile", deployconf.DefaultPidFile,
+			"write the watcher's pid here so `gotun hotplug` can ask it to re-apply."+
+				" Empty disables it, and then an ifup of the tunnel does nothing"),
 		bounceAfter: fs.Duration("bounce-after", 0,
 			"recreate the tunnel interface once it has been dead this long; 0 disables."+
 				" Leave it disabled whenever another daemon owns the interface (sing-box, netifd):"+
@@ -93,6 +97,7 @@ func runWatch(args []string) error {
 		Cooldown:     *w.cooldown,
 		BounceAfter:  *w.bounceAfter,
 		HealthListen: strings.TrimSpace(*w.healthListen),
+		PidFile:      strings.TrimSpace(*w.pidFile),
 	})
 }
 
@@ -109,6 +114,22 @@ type WatchOptions struct {
 	// HealthListen is the address the /alive probe endpoint binds to. Empty
 	// disables it.
 	HealthListen string
+	// PidFile is where the watcher records its pid for `gotun hotplug` to
+	// find. Empty disables it, and then an ifup of the tunnel does nothing.
+	PidFile string
+}
+
+// writePidFile records this process's pid for `gotun hotplug`.
+//
+// Written and renamed rather than written in place, so a hotplug handler that
+// reads it at the wrong moment gets either the old pid or the new one and never
+// a half-written line.
+func writePidFile(path string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Watch applies the policy once and then keeps table 100 honest about whether
@@ -180,6 +201,40 @@ func Watch(o WatchOptions) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP means re-apply now. It is what `gotun hotplug` sends when netifd
+	// reports the tunnel device coming up, and it is a signal rather than a
+	// second process because the watcher is single-threaded by design: a
+	// concurrent apply racing the watchdog is the class of bug this layer
+	// already has. Reapply only hands the request to the loop.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				w.Reapply()
+			}
+		}
+	}()
+
+	if o.PidFile != "" {
+		// Removed on the way out, so a stale file cannot have `gotun hotplug`
+		// signalling a pid the kernel has handed to something else. hotplug
+		// checks the pid is still gotun for the same reason, since a crash
+		// leaves the file behind.
+		if err := writePidFile(o.PidFile); err != nil {
+			// Not fatal: losing the ability to re-apply on demand is worse than
+			// nothing, but much better than losing the watchdog.
+			lg.Printf("could not write %s, so an ifup of the tunnel will not trigger a"+
+				" re-apply: %v", o.PidFile, err)
+		} else {
+			defer os.Remove(o.PidFile)
+		}
+	}
 
 	if o.HealthListen != "" {
 		// Started after the watcher exists so the handler never sees a nil

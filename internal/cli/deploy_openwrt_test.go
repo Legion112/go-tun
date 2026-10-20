@@ -248,8 +248,9 @@ func sameFlagValue(t *testing.T, g *flag.Flag, a, b string) bool {
 // --- A4/A5: documentation and use must cover each other ---------------------
 
 // scriptsReadingGotunConf are the files that still source
-// /etc/gotun/gotun.conf. gotun.init no longer does: it passes the path to the
-// binary, which reads it through internal/deployconf.
+// /etc/gotun/gotun.conf. Only gotun-ipsec.init is left; gotun.init and the
+// hotplug hook now pass the path to the binary, which reads it through
+// internal/deployconf.
 //
 // The companion to this test used to assert the other direction -- that every
 // documented variable is read by some script -- and it has been retired rather
@@ -258,7 +259,7 @@ func sameFlagValue(t *testing.T, g *flag.Flag, a, b string) bool {
 // proxy for "something consumes it". TestSchemaMatchesTheExample asserts that
 // directly and in both directions, against the single source of truth instead
 // of against whichever file happens to mention the name.
-var scriptsReadingGotunConf = []string{"gotun-ipsec.init", "hotplug-iface-gotun"}
+var scriptsReadingGotunConf = []string{"gotun-ipsec.init"}
 
 func TestEveryReadVariableIsDocumented(t *testing.T) {
 	documented := assignedVars(readDeploy(t, "gotun.conf.example"))
@@ -315,20 +316,16 @@ func TestExampleAssignsEachVariableOnce(t *testing.T) {
 	}
 }
 
-// --- A7: the hotplug hook's own default ------------------------------------
-
-func TestHotplugTunnelIfaceDefaultMatchesGo(t *testing.T) {
-	src := readDeploy(t, "hotplug-iface-gotun")
-	m := regexp.MustCompile(`\$\{GOTUN_TUNNEL_IFACE:-([^}]*)\}`).FindStringSubmatch(src)
-	if m == nil {
-		t.Fatal("hotplug-iface-gotun no longer compares $INTERFACE against a GOTUN_TUNNEL_IFACE fallback")
-	}
-	if m[1] != policy.DefaultTunnelIface {
-		t.Errorf("hotplug-iface-gotun falls back to %q but policy.DefaultTunnelIface is %q,"+
-			" so with GOTUN_TUNNEL_IFACE unset the hook compares against a device name that"+
-			" cannot exist and can never fire.", m[1], policy.DefaultTunnelIface)
-	}
-}
+// A7 is gone with the shell it policed. It asserted that the hook's hardcoded
+// fallback equalled policy.DefaultTunnelIface, which mattered only because the
+// hook had a fallback of its own to get wrong -- and it did: "wgexit" against a
+// default of "wg-exit", so with the variable unset the hook could never fire.
+//
+// `gotun hotplug` has no second copy of that name to compare against. The
+// behaviour is asserted directly instead, by
+// TestHotplug_WithNoConfigItUsesTheGoDefault and
+// TestHotplug_TheInterfaceComesFromTheConfig, which test what the hook does
+// rather than what string it contains.
 
 // --- A8: the config must be sourced before anything reads it ---------------
 
