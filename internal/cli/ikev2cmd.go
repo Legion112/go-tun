@@ -222,9 +222,10 @@ func ExportIKEv2(cfg ikev2.Config, outSwanctl, outProfile string) error {
 	// them, each of which fails silently if skipped.
 	fmt.Fprintln(os.Stderr, "gotun ikev2: still to do by hand —")
 	fmt.Fprintln(os.Stderr, "  1. the EAP secret: see the commented stanza at the end of the swanctl file")
-	fmt.Fprintf(os.Stderr, "  2. the xfrm interface: ip link add <name> type xfrm dev <wan> if_id %s,"+
-		" then address it inside %s with a /%d — a /32 leaves the pool off-link and every"+
-		" reply to the phone fails source lookup while the SA still reads ESTABLISHED\n",
+	fmt.Fprintf(os.Stderr, "  2. the xfrm interface: gotun ipsec up -if-id %s -addr <inside %s, with a"+
+		" /%d> — a /32 leaves the pool off-link and every reply to the phone fails source"+
+		" lookup while the SA still reads ESTABLISHED. On OpenWrt /etc/init.d/gotun-ipsec"+
+		" does this from gotun.conf at boot\n",
 		orDefault(cfg.IfID, ikev2.DefaultIfID), cfg.VIPSubnet, cfg.VIPSubnet.Bits())
 	fmt.Fprintf(os.Stderr, "  3. gotun apply -clients-iface <name> -mark-iface <lan>,<name>"+
 		" — leaving the xfrm interface out of -mark-iface gives the phone no split routing"+

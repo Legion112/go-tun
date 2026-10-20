@@ -24,7 +24,31 @@ ssh root@router 'chmod +x /usr/bin/gotun /etc/init.d/gotun /etc/hotplug.d/iface/
 ```
 
 Then create `/etc/gotun/gotun.conf` from `gotun.conf.example`, put the prefix list
-at the path it names, and `/etc/init.d/gotun enable`.
+at the path it names, and check it before starting anything:
+
+```sh
+ssh root@router 'gotun check -config /etc/gotun/gotun.conf'
+```
+
+`check` reads nothing but the file and the prefix list, writes nothing, and
+prints the settings the service will actually run with — the file, the flags and
+the defaults already reconciled. Then `/etc/init.d/gotun enable`.
+
+**Run `check` rather than trusting `start`.** `/etc/init.d/gotun start` exits 0
+even when it refuses: `rc.common` discards `start_service`'s return value, so a
+missing config or an unreadable prefix list prints its reason and still reports
+success. The service is not running, nothing says so, and the next incident gets
+diagnosed from that. `gotun check` is the command with an honest exit status,
+which is also why `gotun.init` runs it as a pre-flight on every start.
+
+From the working tree, `make verify-router` does the same check against the live
+gateway and dumps the state that goes with it — the ip rule, table 100, the nft
+table, which services are enabled and running, and the tunnel device. It is
+read-only, and it is the gate worth running before and after any deploy: the
+container tests run amd64 against an image with no netifd and no fw3, while the
+gateway is aarch64 with both, so the two things most likely to take the house
+offline — a binary for the wrong architecture and a config that has drifted —
+are exactly the two no container can report on.
 
 The split resolver is a separate service, for the reasons in **DNS** below. It is
 optional -- routing works without it -- but a foreign name resolved without the
@@ -219,6 +243,10 @@ argument`, because it never passes the `if_id`, which reads as a kernel problem
 rather than a missing package. Verified against a stock 21.02.7 rootfs. This
 router already has `ip-full` from its vendor firmware, which is why the list
 went this long without it.
+
+You should not have to remember either of those: `gotun ipsec up` attempts the
+operation and names the package that is missing from how it failed. The two
+answers above are the two it tells apart.
 
 There is also an `xfrm` package, and it is *not* wanted here: it adds netifd's
 `proto xfrm` to `/etc/config/network`, and `/etc/init.d/gotun-ipsec`

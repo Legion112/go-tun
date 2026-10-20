@@ -9,7 +9,7 @@ MMDB := data/geo/GeoIP2-City.mmdb
 
 FUZZTIME ?= 30s
 
-.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy fetch-prefixes clean
+.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy verify-router fetch-prefixes clean
 
 all: build test
 
@@ -73,6 +73,42 @@ docker-build:
 # binaries and this image costs no extra Go compilation.
 docker-build-openwrt: docker-build
 	docker build -t gotun:openwrt -f test/integration/openwrt/Dockerfile .
+
+# verify-router is read-only: it reads the live gateway and changes nothing.
+#
+# It is the pre-deploy gate the container tests cannot be. The lab runs amd64
+# against a container with no netifd and no fw3; the gateway is aarch64 with
+# both. What is actually likely to take the household offline is the binary
+# being for the wrong architecture or the live config having drifted, and
+# neither is something a container can tell you about.
+#
+# ROUTER overrides the host: make verify-router ROUTER=root@192.168.8.1
+ROUTER ?= root@flint2
+
+verify-router:
+	@echo "== gotun check against the live config =="
+	@ssh $(ROUTER) 'gotun check -config /etc/gotun/gotun.conf' || true
+	@echo
+	@echo "== ip rule =="
+	@ssh $(ROUTER) 'ip rule show'
+	@echo
+	@echo "== table 100 =="
+	@ssh $(ROUTER) 'ip route show table 100; ip -6 route show table 100'
+	@echo
+	@echo "== nft table inet gotun =="
+	@ssh $(ROUTER) 'nft list table inet gotun | head -40'
+	@echo
+	@echo "== services =="
+	@ssh $(ROUTER) 'for s in gotun gotun-dns gotun-ipsec singbox; do \
+		printf "%-12s " $$s; \
+		if [ -x /etc/init.d/$$s ]; then \
+			/etc/init.d/$$s enabled >/dev/null 2>&1 && printf "enabled " || printf "disabled "; \
+			ubus -S call service list "{\"name\":\"$$s\"}" 2>/dev/null | grep -q "\"running\":true" \
+				&& echo running || echo "not running"; \
+		else echo "not installed"; fi; done'
+	@echo
+	@echo "== tunnel device =="
+	@ssh $(ROUTER) 'ip -br link show | grep -E "xray|ipsec|wg" || echo "none"'
 
 fetch-prefixes: build
 	@if [ -f "$(MMDB)" ]; then \
