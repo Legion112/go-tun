@@ -154,6 +154,15 @@ verify-router:
 	@$(SSH) $(ROUTER) 'ip -br link show | grep -E "xray|ipsec|wg|br-lan" || echo "  none"' || true
 	$(call rsay,hotplug hooks installed)
 	@$(SSH) $(ROUTER) 'ls -l /etc/hotplug.d/iface/*gotun* /etc/hotplug.d/net/*gotun* 2>&1 | sed "s/^/  /"' || true
+	# charon can be running, listening and completely empty. That is what a
+	# reboot used to leave behind, and it looks healthy from every other angle.
+	$(call rsay,strongswan)
+	@$(SSH) $(ROUTER) 'pgrep charon >/dev/null && echo "  charon running" || echo "  charon NOT RUNNING"; \
+		n=$$(swanctl --list-conns 2>/dev/null | grep -cE "^[a-z0-9_-]+: +IKE"); \
+		[ "$$n" -gt 0 ] && echo "  $$n connection(s) loaded" || echo "  NO CONNECTIONS LOADED -- a phone cannot connect"; \
+		swanctl --list-sas 2>/dev/null | grep -cE "ESTABLISHED" | sed "s/^/  established SAs: /"; \
+		[ -f /etc/strongswan.d/gotun-ikev2.conf ] && echo "  load-all start-script installed" \
+			|| echo "  load-all start-script MISSING -- connections will not survive a reboot"' || true
 	$(call rsay,firewall backend)
 	@$(SSH) $(ROUTER) 'command -v fw4 >/dev/null && echo "  fw4 (nftables)" || { command -v fw3 >/dev/null && echo "  fw3 (iptables)" || echo "  neither"; }' || true
 	@echo

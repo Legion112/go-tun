@@ -289,6 +289,38 @@ There is also an `xfrm` package, and it is *not* wanted here: it adds netifd's
 deliberately does not use netifd for this -- see the comment at the top of that
 script for why owning the whole device beats owning half of it.
 
+Then make charon load the configuration at boot, which it does not do by
+itself:
+
+```sh
+scp deploy/openwrt/strongswan-gotun.conf root@router:/etc/strongswan.d/gotun-ikev2.conf
+ssh root@router "printf '/etc/strongswan.conf\n/etc/strongswan.d/\n/etc/swanctl/swanctl.conf\n' >> /etc/sysupgrade.conf"
+```
+
+And make two includes in the packaged files tolerant, because both point into
+`/var`, which is a symlink to `/tmp`:
+
+```sh
+ssh root@router '
+  sed -i "s|^include /var/ipsec/strongswan.conf|include /var/ipsec/*.conf|" /etc/strongswan.conf
+  sed -i "s|^include /var/swanctl/swanctl.conf|include /var/swanctl/*.conf|" /etc/swanctl/swanctl.conf'
+```
+
+**This is the step whose absence does not announce itself.** Without it the
+IKEv2 transport does not survive a reboot: `/etc/init.d/swanctl` starts charon
+but never calls `swanctl --load-all` — it only does that from `reload_service` —
+and the start-script that would, OpenWrt writes into
+`/var/ipsec/strongswan.conf`, generated from UCI `/etc/config/ipsec`. A
+swanctl-only deployment has no such UCI config, so the file is never written,
+and `/var` is tmpfs besides. charon then comes up listening on 500 and 4500 with
+no connections loaded, every handshake is refused, and nothing anywhere says
+why. With the literal include still in place, `swanctl` does not even run: it
+exits with `no files found matching '/var/ipsec/strongswan.conf'`, which reads
+as a broken installation rather than a missing file.
+
+`make verify-router` reports charon's loaded connections for exactly this
+reason.
+
 Then the interface, the PKI, and the configuration:
 
 ```sh
