@@ -599,19 +599,55 @@ func TestIKEv2InstallListIncludesIPFull(t *testing.T) {
 // resolve is a setting that silently does nothing -- the same failure the shell
 // mapping had, moved into Go, which would be the worst possible outcome of
 // replacing one with the other.
+// Each mapping must resolve in the flag set of the command that uses it, not in
+// some other command's.
+//
+// Into refuses a mapping naming a flag the command does not define -- silently
+// skipping one is how a typo becomes a setting that does nothing -- so a
+// mapping pointed at the wrong command does not degrade, it fails outright.
+// That is exactly what `gotun apply -config` did on the router, on
+// GOTUN_RECOVER_AFTER, after this suite had passed: there was one mapping for
+// two commands with different flags, and nothing here checked it per command.
 func TestSchemaFlagsResolve(t *testing.T) {
-	watch := watchFlagSet()
-	for key, name := range deployconf.WatchFlags {
-		if lookup(watch, name) == nil {
-			t.Errorf("deployconf maps %s to -%s, which `gotun watch` does not define", key, name)
+	apply := flag.NewFlagSet("apply", flag.ContinueOnError)
+	registerApplyFlags(apply)
+
+	for _, c := range []struct {
+		command string
+		fs      *flag.FlagSet
+		m       deployconf.Mapping
+	}{
+		{"gotun apply", apply, deployconf.ApplyFlags},
+		{"gotun watch", watchFlagSet(), deployconf.WatchFlags},
+		{"gotun ipsec", ipsecFlagSet(), deployconf.IPsecFlags},
+	} {
+		for key, name := range c.m {
+			if lookup(c.fs, name) == nil {
+				t.Errorf("deployconf maps %s to -%s, which `%s` does not define",
+					key, name, c.command)
+			}
 		}
 	}
+}
 
-	ipsec := flag.NewFlagSet("ipsec up", flag.ContinueOnError)
-	registerIPsecFlags(ipsec)
-	for key, name := range deployconf.IPsecFlags {
-		if lookup(ipsec, name) == nil {
-			t.Errorf("deployconf maps %s to -%s, which `gotun ipsec` does not define", key, name)
+func ipsecFlagSet() *flag.FlagSet {
+	fs := flag.NewFlagSet("ipsec up", flag.ContinueOnError)
+	registerIPsecFlags(fs)
+	return fs
+}
+
+// Everything apply reads, watch must read too: watch re-applies the very same
+// policy, so a setting one honours and the other ignores would change the
+// policy at the moment of a failover.
+func TestApplyFlagsAreASubsetOfWatchFlags(t *testing.T) {
+	for key, name := range deployconf.ApplyFlags {
+		got, ok := deployconf.WatchFlags[key]
+		if !ok {
+			t.Errorf("apply reads %s but watch does not", key)
+			continue
+		}
+		if got != name {
+			t.Errorf("%s maps to -%s for apply and -%s for watch", key, name, got)
 		}
 	}
 }

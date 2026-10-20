@@ -27,23 +27,50 @@ import (
 // mappings that share a file.
 type Mapping map[string]string
 
-// WatchFlags is what `gotun watch`, `gotun apply` and `gotun check` read.
-var WatchFlags = Mapping{
-	"GOTUN_PREFIXES":       "prefixes",
-	"GOTUN_ENDPOINT":       "endpoint",
-	"GOTUN_TUNNEL_IFACE":   "tunnel-iface",
-	"GOTUN_LAN":            "lan",
-	"GOTUN_MARK_IFACE":     "mark-iface",
-	"GOTUN_CLIENTS_IFACE":  "clients-iface",
-	"GOTUN_DIRECT_SRC":     "direct-src",
-	"GOTUN_FAIL_MODE":      "fail-mode",
-	"GOTUN_IPV6":           "ipv6",
-	"GOTUN_IPV6_FALLBACK":  "ipv6-fallback",
+// ApplyFlags is what `gotun apply` reads: the policy, and nothing else.
+//
+// It is a separate mapping from WatchFlags rather than the same one, because
+// apply has no flags for the watchdog settings -- and Into refuses a mapping
+// that names a flag the command does not define, deliberately, since silently
+// skipping one is how a typo becomes a setting that does nothing. One mapping
+// for both commands made `gotun apply -config` fail outright on
+// GOTUN_RECOVER_AFTER, which is how this was found: on the router, by hand,
+// after the whole suite had passed.
+var ApplyFlags = Mapping{
+	"GOTUN_PREFIXES":      "prefixes",
+	"GOTUN_ENDPOINT":      "endpoint",
+	"GOTUN_TUNNEL_IFACE":  "tunnel-iface",
+	"GOTUN_LAN":           "lan",
+	"GOTUN_MARK_IFACE":    "mark-iface",
+	"GOTUN_CLIENTS_IFACE": "clients-iface",
+	"GOTUN_DIRECT_SRC":    "direct-src",
+	"GOTUN_FAIL_MODE":     "fail-mode",
+	"GOTUN_IPV6":          "ipv6",
+	"GOTUN_IPV6_FALLBACK": "ipv6-fallback",
+}
+
+// watchOnlyFlags are the watchdog settings, which only `watch` has flags for.
+var watchOnlyFlags = Mapping{
 	"GOTUN_HEALTH_LISTEN":  "health-listen",
 	"GOTUN_PROBE_TARGET":   "probe-target",
 	"GOTUN_PROBE_INTERVAL": "probe-interval",
 	"GOTUN_FAIL_AFTER":     "fail-after",
 	"GOTUN_RECOVER_AFTER":  "recover-after",
+}
+
+// WatchFlags is what `gotun watch` reads, and `gotun check` with it: check
+// answers the question "what would watch run with", so it has to see the same
+// settings.
+var WatchFlags = union(ApplyFlags, watchOnlyFlags)
+
+func union(ms ...Mapping) Mapping {
+	out := Mapping{}
+	for _, m := range ms {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // IPsecFlags is what `gotun ipsec up|down` reads, out of the same file.

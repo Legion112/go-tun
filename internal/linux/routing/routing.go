@@ -264,7 +264,21 @@ func Clear(r linux.Runner, priority, table int) error {
 			errs = append(errs, fmt.Errorf("ip %s rule del priority %d: %w", f, priority, err))
 		}
 		if _, err := r.Run("ip", f, "route", "flush", "table", fmt.Sprintf("%d", table)); err != nil && !isAbsent(err) {
-			errs = append(errs, fmt.Errorf("ip %s route flush table %d: %w", f, table, err))
+			// A flush with nothing to flush is not a failure, and iproute2
+			// reports it exactly as it reports a real one: exit 2 and "Flush
+			// terminated", for either family. Pattern-matching that message
+			// would also swallow a genuine failure, which during a rollback
+			// means reporting an empty table 100 that still steers traffic.
+			//
+			// So the error path asks the kernel. Routes still listed mean the
+			// flush really did not happen; anything else -- empty, or a table
+			// that cannot even be read -- means there is nothing left behind,
+			// which is all teardown needs to be true. Measured on the router,
+			// where every `/etc/init.d/gotun stop` was reporting a failure
+			// because the IPv6 side of table 100 is empty.
+			if out, _ := r.Run("ip", f, "route", "show", "table", fmt.Sprintf("%d", table)); strings.TrimSpace(out) != "" {
+				errs = append(errs, fmt.Errorf("ip %s route flush table %d: %w", f, table, err))
+			}
 		}
 	}
 	return errors.Join(errs...)

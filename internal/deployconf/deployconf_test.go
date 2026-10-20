@@ -342,3 +342,41 @@ func TestGotunConf_MappingsDoNotShareFlagNames(t *testing.T) {
 		}
 	}
 }
+
+// Each mapping must work against the flag set of its own command. This is the
+// test that was missing: with one mapping shared between apply and watch,
+// `gotun apply -config` failed outright on GOTUN_RECOVER_AFTER -- a flag apply
+// does not define -- and it was found by hand on the router rather than here.
+func TestInto_ApplyFlagsWorkAgainstAnApplyOnlyFlagSet(t *testing.T) {
+	conf, err := Load(filepath.Join("../../deploy/openwrt", "gotun.conf.example"), GotunConf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the policy flags, as `gotun apply` registers them.
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	for _, name := range ApplyFlags {
+		fs.String(name, "", "")
+	}
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.Into(fs, ApplyFlags); err != nil {
+		t.Fatalf("reading the shipped example for apply must work: %v", err)
+	}
+	// And a sanity check that it filled something in, so a mapping that had
+	// quietly become empty could not pass this.
+	if got := fs.Lookup("lan").Value.String(); got == "" {
+		t.Error("-lan was not filled in, so this test is asserting nothing")
+	}
+}
+
+// Nothing in ApplyFlags may name a watchdog setting, since apply has no flags
+// for them.
+func TestApplyFlags_CarryNoWatchdogSettings(t *testing.T) {
+	for key := range watchOnlyFlags {
+		if name, ok := ApplyFlags[key]; ok {
+			t.Errorf("ApplyFlags maps %s to -%s, but that is a watch-only flag", key, name)
+		}
+	}
+}

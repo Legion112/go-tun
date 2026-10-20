@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -190,5 +191,38 @@ func TestReconcile_DeviceRouteWithoutGatewayIsConverged(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("an already-correct table must report 0 changes, got %d; calls=%v", n, r.Calls)
+	}
+}
+
+// A flush with nothing to flush must not read as a failure.
+//
+// iproute2 reports it exactly as it reports a real failure -- exit 2 and
+// "Flush terminated", for either family -- so the message cannot be used to
+// tell them apart. Measured on the router, where the IPv6 side of table 100 is
+// empty and every `/etc/init.d/gotun stop` therefore reported an error.
+func TestClear_AnEmptyTableIsNotAFailedFlush(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Errors["ip -6 route flush table 100"] = errors.New("exit status 2: Flush terminated")
+	// The show that follows also fails on a table that does not exist.
+	r.Errors["ip -6 route show table 100"] = errors.New("exit status 2: Dump terminated")
+
+	if err := Clear(r, 100, 100); err != nil {
+		t.Fatalf("clearing a table with nothing in it must succeed: %v", err)
+	}
+}
+
+// But a flush that failed while routes remain is a rollback that did not
+// happen, and saying otherwise during a teardown is worse than saying nothing.
+func TestClear_RoutesLeftBehindAreStillAFailure(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	r.Errors["ip -6 route flush table 100"] = errors.New("exit status 2: Flush terminated")
+	r.Outputs["ip -6 route show table 100"] = "default dev xray0 metric 10"
+
+	err := Clear(r, 100, 100)
+	if err == nil {
+		t.Fatal("a flush that left routes behind must be reported")
+	}
+	if !strings.Contains(err.Error(), "flush table 100") {
+		t.Errorf("the error does not name what failed: %v", err)
 	}
 }

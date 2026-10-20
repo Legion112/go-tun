@@ -84,7 +84,9 @@ func runApply(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := loadConfigInto(fs, *f.configPath, deployconf.WatchFlags); err != nil {
+	// ApplyFlags, not WatchFlags: apply has no flags for the watchdog settings,
+	// and passing it a mapping that names them fails rather than ignoring them.
+	if err := loadConfigInto(fs, *f.configPath, deployconf.ApplyFlags); err != nil {
 		return err
 	}
 	o, err := f.options()

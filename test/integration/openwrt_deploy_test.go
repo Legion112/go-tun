@@ -510,9 +510,20 @@ func TestOpenWrtPolicy(t *testing.T) {
 		}
 	})
 
-	// The one with the most value in the whole lab.
+	// The one with the most value in the whole lab -- and it goes through
+	// -config, not through flags spelled out here.
+	//
+	// It used to build the flags itself, from a helper written before -config
+	// existed, and that is why `gotun apply -config` was broken on the router
+	// without anything here noticing: apply has no flags for the watchdog
+	// settings, so the config mapping it was handed named five flags it does
+	// not define and it refused outright. Nothing in the suite ran the command
+	// an operator would actually type.
 	t.Run("a second apply changes nothing", func(t *testing.T) {
-		out := o.sh(t, "/usr/bin/gotun apply"+applyArgsFrom(owConf))
+		out, rc := o.shRC(t, "/usr/bin/gotun apply -config /etc/gotun/gotun.conf 2>&1")
+		if rc != 0 {
+			t.Fatalf("`gotun apply -config` failed (rc=%d):\n%s", rc, out)
+		}
 		if !strings.Contains(out, "0 changes") {
 			t.Errorf("re-applying the same policy reports changes, so something read back from"+
 				" nft does not match what was written. On the router this means the ruleset is"+
@@ -552,26 +563,6 @@ func TestOpenWrtPolicy(t *testing.T) {
 				" transport down with it.")
 		}
 	})
-}
-
-// applyArgsFrom turns a gotun.conf into the apply flags equivalent to what
-// gotun.init builds for watch, so the second-apply scenario compares like with
-// like. It is deliberately a separate, dumb translation: sharing code with the
-// init script is the thing being tested.
-func applyArgsFrom(conf string) string {
-	v := map[string]string{}
-	for _, l := range strings.Split(conf, "\n") {
-		k, val, ok := strings.Cut(l, "=")
-		if ok {
-			v[k] = val
-		}
-	}
-	return fmt.Sprintf(
-		" -prefixes %s -endpoint %s -tunnel-iface %s -lan %s -mark-iface %s"+
-			" -clients-iface %s -fail-mode %s -ipv6 %s -ipv6-fallback %s",
-		v["GOTUN_PREFIXES"], v["GOTUN_ENDPOINT"], v["GOTUN_TUNNEL_IFACE"], v["GOTUN_LAN"],
-		v["GOTUN_MARK_IFACE"], v["GOTUN_CLIENTS_IFACE"], v["GOTUN_FAIL_MODE"],
-		v["GOTUN_IPV6"], v["GOTUN_IPV6_FALLBACK"])
 }
 
 // TestOpenWrtDegradedStart covers the tunnel device not existing yet at start,
