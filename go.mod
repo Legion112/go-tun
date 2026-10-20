@@ -8,6 +8,8 @@ require (
 	github.com/maxmind/mmdbwriter v1.2.0
 	github.com/oschwald/maxminddb-golang v1.13.1
 	golang.org/x/sys v0.47.0
+	gopkg.in/yaml.v3 v3.0.1
+	howett.net/plist v1.0.1
 )
 
 require (
