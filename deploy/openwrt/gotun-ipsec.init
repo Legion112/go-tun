@@ -2,82 +2,23 @@
 
 # Creates the xfrm interface an IKEv2 CHILD_SA surfaces on.
 #
-# Route-based rather than policy-based IPsec is what lets gotun classify a
-# phone at all: decrypted packets surface on a named device, so -mark-iface and
-# the home_nets forward rule -- both interface-named -- apply unchanged.
-# Policy-based IPsec surfaces them on the physical WAN device, where neither
-# has anything to attach to.
-#
-# Not netifd's, although OpenWrt has a "proto xfrm". That handler creates the
-# device and assigns no address, and the address is load-bearing: charon
-# installs no route for an xfrm interface, so without an on-link prefix every
-# reply to a client fails source address selection -- while the SA still reads
-# ESTABLISHED and the handshake counters look perfect. Rather than have netifd
-# own half of it and a hotplug script the other half, one owner owns all of it.
+# Everything about the device -- its name, if_id, on-link address, MTU and
+# parent -- lives in `gotun ipsec`, which reads them from gotun.conf. This file
+# only says when.
 #
 # START is before strongswan (90) and gotun (99), so the device exists before
-# anything wants to use it.
+# anything wants to use it. STOP=11 is after gotun's 10, so the policy is
+# withdrawn before the device it steers into is removed.
 
 START=89
 STOP=11
 
 CONF=/etc/gotun/gotun.conf
 
-# Resolves every parameter, config first and defaults second. This is a function
-# rather than file scope because file scope runs before start() sources the
-# config, so each default was being fixed before the operator's value had been
-# read -- every GOTUN_IPSEC_* line in gotun.conf was silently ignored and the
-# script used its own default instead.
-#
-# stop() calls it too: without the config it would resolve a different interface
-# name than start() created, and delete nothing.
-load_config() {
-	# shellcheck source=/dev/null
-	[ -f "$CONF" ] && . "$CONF"
-
-	IFACE="${GOTUN_IPSEC_IFACE:-ipsec0}"
-	IFID="${GOTUN_IPSEC_IFID:-0x61}"
-	ADDR="${GOTUN_IPSEC_ADDR:-10.231.17.1/24}"
-	MTU="${GOTUN_IPSEC_MTU:-1400}"
-
-	# lo rather than the WAN device. The parent is only a hint to the kernel --
-	# the if_id is what binds SAs to this interface -- and naming the WAN would
-	# be wrong the moment ESP arrives somewhere else, such as from a client on
-	# the home LAN.
-	PARENT="${GOTUN_IPSEC_PARENT:-lo}"
-}
-
 start() {
-	load_config
-
-	[ -d /sys/module/xfrm_interface ] || modprobe xfrm_interface 2>/dev/null
-	if [ ! -d /sys/module/xfrm_interface ]; then
-		echo "gotun-ipsec: no xfrm_interface support; install kmod-xfrm-interface" >&2
-		return 1
-	fi
-
-	# Idempotent: re-running must not disturb a live tunnel, so an existing
-	# device is kept and only its address and MTU are reasserted.
-	if ! ip link show "$IFACE" >/dev/null 2>&1; then
-		ip link add "$IFACE" type xfrm dev "$PARENT" if_id "$IFID" || {
-			echo "gotun-ipsec: could not create $IFACE" >&2
-			return 1
-		}
-	fi
-	ip link set "$IFACE" mtu "$MTU"
-	ip address replace "$ADDR" dev "$IFACE"
-	ip link set "$IFACE" up
+	/usr/bin/gotun ipsec up -config "$CONF"
 }
 
 stop() {
-	load_config
-
-	# Checked rather than `|| true`, so that stopping a service that is already
-	# stopped succeeds while a genuine failure to remove an existing device
-	# still reports one. `ip link del` on a missing device exits non-zero, and
-	# as the last command of stop() that made every repeat stop -- and every
-	# shutdown after the device was already gone -- report failure.
-	if ip link show "$IFACE" >/dev/null 2>&1; then
-		ip link del "$IFACE"
-	fi
+	/usr/bin/gotun ipsec down -config "$CONF"
 }

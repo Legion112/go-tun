@@ -899,6 +899,33 @@ func TestOpenWrtIPsec(t *testing.T) {
 		}
 	})
 
+	// The improvement over the shell gate, proved against the real busybox in
+	// this image rather than against a fixture.
+	//
+	// The script tested `[ -d /sys/module/xfrm_interface ]`, which is the wrong
+	// question in three ways: it passes on a kernel with the support compiled
+	// in and no module, it passes in a container whose host kernel has the
+	// module while the container's own ip cannot use it, and it says nothing
+	// about busybox at all. busybox's ip accepts every word of the command and
+	// never passes the if_id, so the kernel refuses it -- and the refusal,
+	// "RTNETLINK answers: Invalid argument", reads exactly like a kernel
+	// problem. That is how the IKEv2 install list in the README went this long
+	// without ip-full.
+	t.Run("busybox ip is diagnosed as a missing package", func(t *testing.T) {
+		o.sh(t, "mkdir -p /tmp/bbin && ln -sf /bin/busybox /tmp/bbin/ip")
+		o.sh(t, "/etc/init.d/gotun-ipsec stop")
+
+		out, rc := o.shRC(t, "PATH=/tmp/bbin:$PATH /usr/bin/gotun ipsec up"+
+			" -config /etc/gotun/gotun.conf -iface ipsecbb 2>&1")
+		if rc == 0 {
+			t.Fatalf("busybox ip created an xfrm device, which it cannot do:\n%s", out)
+		}
+		if !strings.Contains(out, "ip-full") {
+			t.Errorf("the failure does not name the missing package, so an operator reads it"+
+				" as a kernel problem and installs the wrong thing:\n%s", out)
+		}
+	})
+
 	// The xfrm device has to exist before anything routes into it.
 	t.Run("it starts before gotun in the boot order", func(t *testing.T) {
 		o.sh(t, "/etc/init.d/gotun-ipsec enable && /etc/init.d/gotun enable")

@@ -12,9 +12,11 @@
 # geo-localised at best, interfered with at worst. Routing the query through the
 # tunnel is what makes the address the client finally connects to the right one.
 
-# gotun-dns's own default is :53, which is right for a standalone resolver and
-# wrong here: dnsmasq owns :53 on this box and also serves DHCP. dnsmasq
-# forwards to this address, so the two do not collide.
+# This is also gotun-dns's own default, so the line is here to document the
+# reason rather than to change anything. The resolver is never the only one on a
+# box -- it answers the subset of names that must go through the tunnel, and
+# something else has to forward to it. Here that is dnsmasq, which owns :53 and
+# serves DHCP.
 #
 #   uci add_list dhcp.@dnsmasq[0].server=127.0.0.2
 #   uci commit dhcp && /etc/init.d/dnsmasq reload

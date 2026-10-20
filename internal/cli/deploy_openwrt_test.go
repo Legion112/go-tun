@@ -200,12 +200,13 @@ func TestNoFlagIsPassedAnUnconditionallyEmptyValue(t *testing.T) {
 // default, with the reason. Anything not listed here must agree, because three
 // sources of truth with no stated reason is how a parameter ends up meaning two
 // different things depending on whether the operator set it.
-var justifiedDivergence = map[string]map[string]string{
-	"gotun-dns.init": {
-		"listen": "dnsmasq owns :53 on this box and forwards to 127.0.0.2; the Go default" +
-			" of :53 is right for a standalone resolver and wrong for this deployment",
-	},
-}
+// It is empty, and that is the better outcome. Its one entry recorded
+// gotun-dns.init overriding a :53 default with 127.0.0.2:53, justified by
+// dnsmasq owning :53 here -- and the justification turned out to argue against
+// the default rather than for the override. This resolver is never the only one
+// on a box; something has to forward to it. 127.0.0.2:53 is now the binary's
+// own default, so there is nothing to diverge.
+var justifiedDivergence = map[string]map[string]string{}
 
 func TestShellFallbacksMatchGoDefaults(t *testing.T) {
 	fs := watchFlagSet()
@@ -248,9 +249,13 @@ func sameFlagValue(t *testing.T, g *flag.Flag, a, b string) bool {
 // --- A4/A5: documentation and use must cover each other ---------------------
 
 // scriptsReadingGotunConf are the files that still source
-// /etc/gotun/gotun.conf. Only gotun-ipsec.init is left; gotun.init and the
-// hotplug hook now pass the path to the binary, which reads it through
-// internal/deployconf.
+// /etc/gotun/gotun.conf.
+//
+// It is empty, and that is the point this refactor was for: every script now
+// passes the path to the binary, which reads the file through
+// internal/deployconf. The two tests below therefore have nothing to check and
+// are kept only so that reintroducing a shell read of gotun.conf is policed the
+// moment it happens -- that is where the drift used to come from.
 //
 // The companion to this test used to assert the other direction -- that every
 // documented variable is read by some script -- and it has been retired rather
@@ -259,7 +264,7 @@ func sameFlagValue(t *testing.T, g *flag.Flag, a, b string) bool {
 // proxy for "something consumes it". TestSchemaMatchesTheExample asserts that
 // directly and in both directions, against the single source of truth instead
 // of against whichever file happens to mention the name.
-var scriptsReadingGotunConf = []string{"gotun-ipsec.init"}
+var scriptsReadingGotunConf = []string{}
 
 func TestEveryReadVariableIsDocumented(t *testing.T) {
 	documented := assignedVars(readDeploy(t, "gotun.conf.example"))
@@ -464,20 +469,38 @@ func TestExampleParsesAsShell(t *testing.T) {
 
 // --- A12: gotun-dns must agree with gotun on the mark ----------------------
 
-// The mark is the one parameter the two daemons must agree on exactly: gotun
-// steers marked packets into table 100, and gotun-dns marks its own upstream
-// queries to be steered the same way. A split here does not fail loudly, it
-// quietly stops DNS being tunnelled, which is the failure that returns a
-// geo-localised address for a foreign name.
-func TestGotunDNSMarkMatchesPolicyDefault(t *testing.T) {
-	src := readDeploy(t, "gotun-dns.init")
-	m := regexp.MustCompile(`\$\{GOTUN_DNS_MARK:-([^}]*)\}`).FindStringSubmatch(src)
-	if m == nil {
-		t.Fatal("gotun-dns.init no longer passes -mark with a GOTUN_DNS_MARK fallback")
+// The mark is the one value the two daemons must agree on exactly: gotun steers
+// marked packets into table 100, and gotun-dns marks its own upstream queries
+// to be steered the same way. A split does not fail loudly -- it quietly stops
+// DNS being tunnelled, which is the failure that returns a geo-localised
+// address for a foreign name.
+//
+// This used to compare gotun-dns.init's `${GOTUN_DNS_MARK:-0x1}` against
+// policy.DefaultMark, because the script carried a second copy of the number.
+// It does not any more, so what is checked instead is that the remaining copy
+// is *derived* rather than written out: a literal here would be a number that
+// can drift, and the comparison would have to be reintroduced.
+func TestGotunDNSMarkIsDerivedFromPolicy(t *testing.T) {
+	src, err := os.ReadFile("../../cmd/gotun-dns/main.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := fmt.Sprintf("0x%x", policy.DefaultMark)
-	if m[1] != want {
-		t.Errorf("gotun-dns.init falls back to -mark %q but policy.DefaultMark is %s", m[1], want)
+	// Line-based rather than a regex over the argument list, because the
+	// expression it is looking for contains commas of its own.
+	var decl string
+	for _, l := range strings.Split(string(src), "\n") {
+		if strings.Contains(l, `flag.String("mark"`) {
+			decl = strings.TrimSpace(l)
+			break
+		}
+	}
+	if decl == "" {
+		t.Fatal("cmd/gotun-dns no longer defines a -mark flag; the parser needs updating")
+	}
+	if !strings.Contains(decl, "policy.DefaultMark") {
+		t.Errorf("gotun-dns defaults -mark from %s rather than deriving it from"+
+			" policy.DefaultMark. Two copies of the mark can disagree, and when they do"+
+			" DNS silently stops being tunnelled.", decl)
 	}
 }
 
@@ -577,10 +600,18 @@ func TestIKEv2InstallListIncludesIPFull(t *testing.T) {
 // mapping had, moved into Go, which would be the worst possible outcome of
 // replacing one with the other.
 func TestSchemaFlagsResolve(t *testing.T) {
-	fs := watchFlagSet()
+	watch := watchFlagSet()
 	for key, name := range deployconf.WatchFlags {
-		if lookup(fs, name) == nil {
+		if lookup(watch, name) == nil {
 			t.Errorf("deployconf maps %s to -%s, which `gotun watch` does not define", key, name)
+		}
+	}
+
+	ipsec := flag.NewFlagSet("ipsec up", flag.ContinueOnError)
+	registerIPsecFlags(ipsec)
+	for key, name := range deployconf.IPsecFlags {
+		if lookup(ipsec, name) == nil {
+			t.Errorf("deployconf maps %s to -%s, which `gotun ipsec` does not define", key, name)
 		}
 	}
 }
