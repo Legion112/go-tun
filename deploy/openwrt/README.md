@@ -19,9 +19,24 @@ torn down.
 make build-arm64
 scp bin/gotun-linux-arm64 root@router:/usr/bin/gotun
 scp deploy/openwrt/gotun.init root@router:/etc/init.d/gotun
+ssh root@router 'mkdir -p /etc/hotplug.d/net'
 scp deploy/openwrt/hotplug-iface-gotun root@router:/etc/hotplug.d/iface/99-gotun
-ssh root@router 'chmod +x /usr/bin/gotun /etc/init.d/gotun /etc/hotplug.d/iface/99-gotun'
+scp deploy/openwrt/hotplug-iface-gotun root@router:/etc/hotplug.d/net/99-gotun
+ssh root@router 'chmod +x /usr/bin/gotun /etc/init.d/gotun /etc/hotplug.d/iface/99-gotun /etc/hotplug.d/net/99-gotun'
 ```
+
+Both directories, and that is not belt-and-braces. The two kinds of hotplug
+event describe themselves differently and only one of them happens here:
+
+| | `ACTION` | `INTERFACE` | `DEVICE` |
+|---|---|---|---|
+| `iface` | `ifup` | the UCI section name | the device |
+| `net` | `add` | the device | empty |
+
+A device created outside netifd — which is exactly how sing-box makes its tun —
+produces **no `iface` event at all**. Installed in `iface/` alone, as it was
+until now, the hook was never invoked on this router. Measured in the deploy
+lab against real netifd.
 
 Then create `/etc/gotun/gotun.conf` from `gotun.conf.example`, put the prefix list
 at the path it names, and check it before starting anything:
@@ -45,10 +60,16 @@ From the working tree, `make verify-router` does the same check against the live
 gateway and dumps the state that goes with it — the ip rule, table 100, the nft
 table, which services are enabled and running, and the tunnel device. It is
 read-only, and it is the gate worth running before and after any deploy: the
-container tests run amd64 against an image with no netifd and no fw3, while the
-gateway is aarch64 with both, so the two things most likely to take the house
-offline — a binary for the wrong architecture and a config that has drifted —
-are exactly the two no container can report on.
+container tests run amd64 while the gateway is aarch64, so the two things most
+likely to take the house offline — a binary for the wrong architecture and a
+config that has drifted — are exactly the two no container can report on.
+
+The lab does now run netifd and fw3, in a second fixture alongside the fast one.
+That is what established which hotplug events actually occur here, and it is
+where the firewall coexistence is checked: that `gotun apply` leaves fw3's rules
+untouched, and that a firewall reload — which OpenWrt triggers by itself on
+every interface event, through `/etc/hotplug.d/iface/20-firewall` — leaves the
+nft table, the ip rule and table 100 intact.
 
 The split resolver is a separate service, for the reasons in **DNS** below. It is
 optional -- routing works without it -- but a foreign name resolved without the
@@ -68,7 +89,7 @@ Its own settings live in `/etc/gotun/gotun-dns.conf`; see
 binary and the config directory:
 
 ```sh
-printf '/usr/bin/gotun\n/etc/gotun/\n/etc/init.d/gotun\n/etc/init.d/gotun-dns\n/etc/hotplug.d/iface/99-gotun\n' >> /etc/sysupgrade.conf
+printf '/usr/bin/gotun\n/etc/gotun/\n/etc/init.d/gotun\n/etc/init.d/gotun-dns\n/etc/hotplug.d/iface/99-gotun\n/etc/hotplug.d/net/99-gotun\n' >> /etc/sysupgrade.conf
 # With the IKEv2 transport, the xfrm interface script and everything swanctl
 # holds -- the CA key above all, since losing it means reissuing every profile.
 printf '/etc/init.d/gotun-ipsec\n/etc/swanctl/\n' >> /etc/sysupgrade.conf

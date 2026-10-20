@@ -33,9 +33,12 @@ func runHotplug(args []string) error {
 	pidFile := fs.String("pidfile", deployconf.DefaultPidFile,
 		"where `gotun watch` recorded its pid")
 	action := fs.String("action", "",
-		"the event, defaulting to $ACTION as netifd sets it")
+		"the event, defaulting to $ACTION as the hotplug caller sets it")
 	iface := fs.String("interface", "",
-		"the interface the event is about, defaulting to $INTERFACE as netifd sets it")
+		"defaulting to $INTERFACE: the UCI section name in an iface event,"+
+			" the device name in a net event")
+	device := fs.String("device", "",
+		"defaulting to $DEVICE: the device name in an iface event, empty in a net event")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -44,16 +47,44 @@ func runHotplug(args []string) error {
 			" $ACTION and $INTERFACE", fs.Arg(0))
 	}
 
-	// The environment is how netifd passes the event; the flags exist so the
-	// same decision can be exercised without one.
+	// The environment is how the hotplug caller passes the event; the flags
+	// exist so the same decision can be exercised without one.
 	if *action == "" {
 		*action = os.Getenv("ACTION")
 	}
 	if *iface == "" {
 		*iface = os.Getenv("INTERFACE")
 	}
-	if *action != "ifup" {
+	if *device == "" {
+		*device = os.Getenv("DEVICE")
+	}
+
+	// The two kinds of hotplug event describe themselves differently, and the
+	// difference is the whole reason this hook never worked. Measured in the
+	// lab against real netifd:
+	//
+	//   iface  ACTION=ifup  INTERFACE=<UCI section>  DEVICE=<device>
+	//   net    ACTION=add   INTERFACE=<device>       DEVICE=<empty>
+	//
+	// So an iface event names the section, not the device -- and the shell
+	// version compared that against a device name, which could never match.
+	// Worse, a device created outside netifd, which is exactly how sing-box
+	// makes its tun, produces *no iface event at all*: only a net event. The
+	// hook lived in /etc/hotplug.d/iface/ alone, so on this deployment it was
+	// never invoked.
+	//
+	// Both shapes are handled, and the hook is installed in both directories.
+	switch *action {
+	case "ifup", "add":
+	default:
 		return nil
+	}
+
+	// DEVICE when the event has one, INTERFACE otherwise -- which in a net
+	// event is the device.
+	got := *device
+	if got == "" {
+		got = *iface
 	}
 
 	// Which device matters comes from the config, so it cannot disagree with
@@ -70,7 +101,7 @@ func runHotplug(args []string) error {
 			want = strings.TrimSpace(v)
 		}
 	}
-	if *iface != want {
+	if got != want {
 		return nil
 	}
 
@@ -87,7 +118,7 @@ func runHotplug(args []string) error {
 		return nil
 	}
 
-	fmt.Printf("gotun hotplug: reapplying policy after ifup of %s\n", *iface)
+	fmt.Printf("gotun hotplug: reapplying policy after %s of %s\n", *action, got)
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		return fmt.Errorf("signalling gotun watch (pid %d): %w", pid, err)
 	}

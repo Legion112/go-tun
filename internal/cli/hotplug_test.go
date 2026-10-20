@@ -28,51 +28,89 @@ func hotplugFixture(t *testing.T, pid int) (confPath, pidPath string) {
 	return confPath, pidPath
 }
 
-// netifd runs this hook for every interface event on the box, so the overwhelming
-// majority of invocations must do nothing -- quietly, and without needing a
-// watcher to exist.
+// The two event shapes, exactly as measured against real netifd in the lab:
+//
+//	iface  ACTION=ifup  INTERFACE=<UCI section>  DEVICE=<device>
+//	net    ACTION=add   INTERFACE=<device>       DEVICE=<empty>
+//
+// These are not invented. The earlier version of this test set ACTION and
+// INTERFACE by hand to the shapes I assumed, which is how the hook passed its
+// tests while being unable to fire on the router: an iface event names the UCI
+// section, and comparing that against a device name never matches.
+type hotplugEvent struct{ action, iface, device string }
+
+func (e hotplugEvent) args(conf, pidFile string) []string {
+	return []string{
+		"-config", conf, "-pidfile", pidFile,
+		"-action", e.action, "-interface", e.iface, "-device", e.device,
+	}
+}
+
+// netifd runs these hooks for every interface and device event on the box, so
+// the overwhelming majority of invocations must do nothing -- quietly, and
+// without needing a watcher to exist.
 func TestHotplug_IgnoresEventsItDoesNotOwn(t *testing.T) {
 	conf, pidFile := hotplugFixture(t, os.Getpid())
 	pidIsGotun = func(int) bool { return true }
 	t.Cleanup(func() { pidIsGotun = realPidIsGotun })
 
-	for _, c := range []struct{ name, action, iface string }{
-		{"ifdown of the tunnel", "ifdown", "xray0"},
-		{"ifup of the LAN", "ifup", "lan"},
-		{"ifup of the WAN", "ifup", "wan"},
-		{"an event with no action", "", "xray0"},
+	for _, c := range []struct {
+		name string
+		ev   hotplugEvent
+	}{
+		{"iface ifdown of the tunnel", hotplugEvent{"ifdown", "xray", "xray0"}},
+		{"net remove of the tunnel", hotplugEvent{"remove", "xray0", ""}},
+		{"iface ifup of the LAN", hotplugEvent{"ifup", "lan", "br-lan"}},
+		{"net add of the LAN bridge", hotplugEvent{"add", "br-lan", ""}},
+		{"an event with no action", hotplugEvent{"", "xray0", ""}},
+		{
+			// The trap in the iface shape: the section happens to be called
+			// xray0 but the device is something else entirely.
+			name: "iface ifup whose section is named like our device",
+			ev:   hotplugEvent{"ifup", "xray0", "eth1"},
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := catchHUP(t, func() error {
-				return runHotplug([]string{
-					"-config", conf, "-pidfile", pidFile,
-					"-action", c.action, "-interface", c.iface,
-				})
-			})
-			if got {
+			if catchHUP(t, func() error { return runHotplug(c.ev.args(conf, pidFile)) }) {
 				t.Error("the hook re-applied the policy for an event it does not own")
 			}
 		})
 	}
 }
 
-// The event it exists for. The shell version got this far and then ran
-// `/etc/init.d/gotun start`, which procd treats as a no-op on a running
-// service, so it accomplished nothing for as long as it existed.
-func TestHotplug_SignalsTheWatcherOnTunnelIfup(t *testing.T) {
+// The events it exists for, both shapes.
+//
+// The net one is the shape that matters on this deployment: sing-box creates
+// its tun outside netifd, which produces no iface event at all, so for as long
+// as the hook lived in /etc/hotplug.d/iface/ alone it was never invoked.
+func TestHotplug_SignalsTheWatcherForBothEventShapes(t *testing.T) {
 	conf, pidFile := hotplugFixture(t, os.Getpid())
 	pidIsGotun = func(int) bool { return true }
 	t.Cleanup(func() { pidIsGotun = realPidIsGotun })
 
-	got := catchHUP(t, func() error {
-		return runHotplug([]string{
-			"-config", conf, "-pidfile", pidFile,
-			"-action", "ifup", "-interface", "xray0",
+	for _, c := range []struct {
+		name string
+		ev   hotplugEvent
+	}{
+		{
+			// A device created outside netifd: only INTERFACE is set, and it
+			// holds the device name.
+			name: "net add of a device netifd does not manage",
+			ev:   hotplugEvent{"add", "xray0", ""},
+		},
+		{
+			// A device netifd does manage: INTERFACE is the section name and
+			// DEVICE is what must be matched.
+			name: "iface ifup where the section is named differently",
+			ev:   hotplugEvent{"ifup", "xray", "xray0"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if !catchHUP(t, func() error { return runHotplug(c.ev.args(conf, pidFile)) }) {
+				t.Error("the watcher was not signalled, so the route the kernel withdrew on" +
+					" the bounce never comes back")
+			}
 		})
-	})
-	if !got {
-		t.Error("an ifup of the tunnel did not signal the watcher, so the route the kernel" +
-			" withdrew on the bounce never comes back")
 	}
 }
 
@@ -85,10 +123,7 @@ func TestHotplug_DoesNothingWithNoWatcherRunning(t *testing.T) {
 	conf, pidFile := hotplugFixture(t, 0) // no pidfile written
 
 	got := catchHUP(t, func() error {
-		return runHotplug([]string{
-			"-config", conf, "-pidfile", pidFile,
-			"-action", "ifup", "-interface", "xray0",
-		})
+		return runHotplug(hotplugEvent{"add", "xray0", ""}.args(conf, pidFile))
 	})
 	if got {
 		t.Error("something was signalled although no watcher is running")
@@ -104,10 +139,7 @@ func TestHotplug_IgnoresAStalePidfile(t *testing.T) {
 	t.Cleanup(func() { pidIsGotun = realPidIsGotun })
 
 	got := catchHUP(t, func() error {
-		return runHotplug([]string{
-			"-config", conf, "-pidfile", pidFile,
-			"-action", "ifup", "-interface", "xray0",
-		})
+		return runHotplug(hotplugEvent{"add", "xray0", ""}.args(conf, pidFile))
 	})
 	if got {
 		t.Error("a pid that is no longer gotun was signalled anyway")
@@ -132,14 +164,12 @@ func TestHotplug_TheInterfaceComesFromTheConfig(t *testing.T) {
 	t.Cleanup(func() { pidIsGotun = realPidIsGotun })
 
 	if got := catchHUP(t, func() error {
-		return runHotplug([]string{"-config", conf, "-pidfile", pidFile,
-			"-action", "ifup", "-interface", "xray0"})
+		return runHotplug(hotplugEvent{"add", "xray0", ""}.args(conf, pidFile))
 	}); got {
 		t.Error("the hook fired for xray0 although the config names ipsec0")
 	}
 	if got := catchHUP(t, func() error {
-		return runHotplug([]string{"-config", conf, "-pidfile", pidFile,
-			"-action", "ifup", "-interface", "ipsec0"})
+		return runHotplug(hotplugEvent{"add", "ipsec0", ""}.args(conf, pidFile))
 	}); !got {
 		t.Error("the hook did not fire for the interface the config names")
 	}
@@ -157,7 +187,7 @@ func TestHotplug_WithNoConfigItUsesTheGoDefault(t *testing.T) {
 	t.Cleanup(func() { pidIsGotun = realPidIsGotun })
 
 	got := catchHUP(t, func() error {
-		return runHotplug([]string{"-pidfile", pidFile, "-action", "ifup",
+		return runHotplug([]string{"-pidfile", pidFile, "-action", "add",
 			"-interface", "wg-exit"}) // policy.DefaultTunnelIface
 	})
 	if !got {
@@ -176,7 +206,7 @@ func TestHotplug_RefusesPositionalArguments(t *testing.T) {
 }
 
 func TestHotplug_ReportsAnUnreadableConfig(t *testing.T) {
-	err := runHotplug([]string{"-config", "/nope.conf", "-action", "ifup", "-interface", "xray0"})
+	err := runHotplug([]string{"-config", "/nope.conf", "-action", "add", "-interface", "xray0"})
 	if err == nil {
 		t.Fatal("want an error for a config that cannot be read")
 	}

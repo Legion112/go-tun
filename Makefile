@@ -58,7 +58,8 @@ test-integration: docker-build docker-build-openwrt test-nft-real
 	GOTUN_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 15m ./test/integration/...
 
 # Just the deploy lab, for iterating on deploy/openwrt/ without waiting for the
-# topology labs.
+# topology labs. Covers both fixtures: the fast one with netifd and fw3 out of
+# the way, and the realistic one with both running.
 test-deploy: docker-build-openwrt
 	GOTUN_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 15m ./test/integration/ -run OpenWrt
 

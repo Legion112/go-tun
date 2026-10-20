@@ -44,12 +44,16 @@ const openwrtImage = "gotun:openwrt"
 // never bakes them into the image: a cached image carrying last week's
 // gotun.init would silently test last week's script, in a suite whose entire
 // purpose is confidence that nothing changed.
+// Keyed by destination, because one source goes to two places: the hotplug hook
+// is installed in both iface/ and net/, since a device created outside netifd
+// produces only the latter.
 var deployFiles = map[string]string{
-	"gotun.init":          "/etc/init.d/gotun",
-	"gotun-dns.init":      "/etc/init.d/gotun-dns",
-	"gotun-ipsec.init":    "/etc/init.d/gotun-ipsec",
-	"singbox.init":        "/etc/init.d/singbox",
-	"hotplug-iface-gotun": "/etc/hotplug.d/iface/99-gotun",
+	"/etc/init.d/gotun":             "gotun.init",
+	"/etc/init.d/gotun-dns":         "gotun-dns.init",
+	"/etc/init.d/gotun-ipsec":       "gotun-ipsec.init",
+	"/etc/init.d/singbox":           "singbox.init",
+	"/etc/hotplug.d/iface/99-gotun": "hotplug-iface-gotun",
+	"/etc/hotplug.d/net/99-gotun":   "hotplug-iface-gotun",
 }
 
 type owLab struct {
@@ -198,8 +202,9 @@ func (o *owLab) poll(t *testing.T, what string, timeout time.Duration, f func() 
 func (o *owLab) installDeploy(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	must(t, o.lab.ExecOK(ctx, o.node, "mkdir", "-p", "/etc/gotun", "/etc/hotplug.d/iface"))
-	for src, dst := range deployFiles {
+	must(t, o.lab.ExecOK(ctx, o.node, "mkdir", "-p",
+		"/etc/gotun", "/etc/hotplug.d/iface", "/etc/hotplug.d/net"))
+	for dst, src := range deployFiles {
 		must(t, o.lab.Copy(ctx, o.node, filepath.Join("../../deploy/openwrt", src), dst))
 		must(t, o.lab.ExecOK(ctx, o.node, "chmod", "0755", dst))
 	}

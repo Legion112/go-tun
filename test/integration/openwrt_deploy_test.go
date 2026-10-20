@@ -68,7 +68,7 @@ func TestOpenWrtFixture(t *testing.T) {
 	})
 
 	t.Run("the deploy scripts are installed and executable", func(t *testing.T) {
-		for _, dst := range deployFiles {
+		for dst := range deployFiles {
 			if out, rc := o.shRC(t, "test -x "+dst); rc != 0 {
 				t.Errorf("%s is not installed or not executable: %s", dst, out)
 			}
