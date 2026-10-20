@@ -26,16 +26,31 @@ ssh root@router 'chmod +x /usr/bin/gotun /etc/init.d/gotun /etc/hotplug.d/iface/
 Then create `/etc/gotun/gotun.conf` from `gotun.conf.example`, put the prefix list
 at the path it names, and `/etc/init.d/gotun enable`.
 
+The split resolver is a separate service, for the reasons in **DNS** below. It is
+optional -- routing works without it -- but a foreign name resolved without the
+tunnel gives a *different* answer, not merely a slower one:
+
+```sh
+scp deploy/openwrt/gotun-dns.init root@router:/etc/init.d/gotun-dns
+ssh root@router 'chmod +x /etc/init.d/gotun-dns && /etc/init.d/gotun-dns enable'
+```
+
+Its own settings live in `/etc/gotun/gotun-dns.conf`; see
+`gotun-dns.conf.example`. All of them have defaults, so the file is optional.
+
 ## Persistence across firmware upgrades
 
 `/usr/bin` is wiped by sysupgrade; `/etc` is not, but only if listed. Add both the
 binary and the config directory:
 
 ```sh
-printf '/usr/bin/gotun\n/etc/gotun/\n/etc/init.d/gotun\n/etc/hotplug.d/iface/99-gotun\n' >> /etc/sysupgrade.conf
+printf '/usr/bin/gotun\n/etc/gotun/\n/etc/init.d/gotun\n/etc/init.d/gotun-dns\n/etc/hotplug.d/iface/99-gotun\n' >> /etc/sysupgrade.conf
 # With the IKEv2 transport, the xfrm interface script and everything swanctl
 # holds -- the CA key above all, since losing it means reissuing every profile.
 printf '/etc/init.d/gotun-ipsec\n/etc/swanctl/\n' >> /etc/sysupgrade.conf
+# With the sing-box transport, its init script. sing-box's own binary lives in
+# /usr/bin and has to be reinstalled either way.
+printf '/etc/init.d/singbox\n' >> /etc/sysupgrade.conf
 ```
 
 Without this, a firmware upgrade silently leaves the router with no classifier:
@@ -188,14 +203,27 @@ exist:
 
 ```sh
 opkg update
-opkg install kmod-xfrm-interface xfrm strongswan-full strongswan-swanctl strongswan-pki
+opkg install kmod-xfrm-interface ip-full strongswan-full strongswan-swanctl strongswan-pki
 ```
 
-`kmod-xfrm-interface` is the go/no-go. Without it `ip link add type xfrm`
-answers `RTNETLINK answers: Not supported`, route-based IPsec is impossible,
-and the fallback -- classifying by source address rather than by ingress
-interface -- is not built. The package exists for this kernel; it is simply not
-installed by default.
+Two of those are go/no-go, and neither announces itself as the cause.
+
+`kmod-xfrm-interface`: without it `ip link add type xfrm` answers `RTNETLINK
+answers: Not supported`, route-based IPsec is impossible, and the fallback --
+classifying by source address rather than by ingress interface -- is not built.
+The package exists for this kernel; it is simply not installed by default.
+
+`ip-full`: busybox's `ip` cannot create an xfrm interface even with the module
+loaded. It does not say so either -- it answers `RTNETLINK answers: Invalid
+argument`, because it never passes the `if_id`, which reads as a kernel problem
+rather than a missing package. Verified against a stock 21.02.7 rootfs. This
+router already has `ip-full` from its vendor firmware, which is why the list
+went this long without it.
+
+There is also an `xfrm` package, and it is *not* wanted here: it adds netifd's
+`proto xfrm` to `/etc/config/network`, and `/etc/init.d/gotun-ipsec`
+deliberately does not use netifd for this -- see the comment at the top of that
+script for why owning the whole device beats owning half of it.
 
 Then the interface, the PKI, and the configuration:
 

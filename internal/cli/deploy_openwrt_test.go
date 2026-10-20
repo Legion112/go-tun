@@ -488,3 +488,92 @@ func TestGotunDNSMarkMatchesPolicyDefault(t *testing.T) {
 		t.Errorf("gotun-dns.init falls back to -mark %q but policy.DefaultMark is %s", m[1], want)
 	}
 }
+
+// --- A13: the README must install what the repository ships -----------------
+
+// Shipping a service nobody is told to install is how the hotplug hook came to
+// be documented, committed, and absent from the router for months -- the
+// repository described a component that was not deployed and would not have
+// worked if it were.
+func TestEveryInitScriptHasAnInstallStep(t *testing.T) {
+	readme := readDeploy(t, "README.md")
+	for _, name := range []string{
+		"gotun.init", "gotun-dns.init", "gotun-ipsec.init", "singbox.init",
+		"hotplug-iface-gotun",
+	} {
+		if !strings.Contains(readme, "deploy/openwrt/"+name) {
+			t.Errorf("deploy/openwrt/%s is shipped but the README never installs it,"+
+				" so an operator following the instructions ends up without it", name)
+		}
+	}
+}
+
+// A firmware upgrade keeps /etc only for the paths listed in
+// /etc/sysupgrade.conf. Anything the README installs there and does not list is
+// silently gone after the next upgrade -- and gone quietly, because the ip rule
+// and the nft table are kernel state, so traffic simply reverts to leaving via
+// the ISP for everything.
+func TestEveryInstalledEtcPathPersistsAcrossSysupgrade(t *testing.T) {
+	readme := readDeploy(t, "README.md")
+
+	// The paths the README's sysupgrade.conf lines name, including directories,
+	// which cover everything beneath them.
+	var listed []string
+	for _, m := range regexp.MustCompile(`printf '([^']*)' >> /etc/sysupgrade\.conf`).
+		FindAllStringSubmatch(readme, -1) {
+		for _, p := range strings.Split(m[1], `\n`) {
+			if p != "" {
+				listed = append(listed, p)
+			}
+		}
+	}
+	if len(listed) == 0 {
+		t.Fatal("found no sysupgrade.conf lines in the README; the parser needs updating")
+	}
+
+	installs := regexp.MustCompile(`(?m)^scp \S+ root@router:(/etc/\S+)`).
+		FindAllStringSubmatch(readme, -1)
+	if len(installs) == 0 {
+		t.Fatal("found no scp lines installing into /etc; the parser needs updating")
+	}
+	for _, m := range installs {
+		dst := m[1]
+		covered := false
+		for _, l := range listed {
+			if l == dst || (strings.HasSuffix(l, "/") && strings.HasPrefix(dst, l)) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("the README installs %s but never adds it to /etc/sysupgrade.conf,"+
+				" so the next firmware upgrade removes it. Nothing breaks loudly when that"+
+				" happens: traffic just reverts to leaving via the ISP for everything.",
+				dst)
+		}
+	}
+}
+
+// busybox's ip cannot create an xfrm interface even with kmod-xfrm-interface
+// loaded, and it does not say so -- it answers "RTNETLINK answers: Invalid
+// argument", because it never passes the if_id, which reads as a kernel problem
+// rather than a missing package. The IKEv2 install list went a long time
+// without ip-full because this router has it from its vendor firmware.
+func TestIKEv2InstallListIncludesIPFull(t *testing.T) {
+	readme := readDeploy(t, "README.md")
+	m := regexp.MustCompile(`(?m)^opkg install (.*kmod-xfrm-interface.*)$`).FindStringSubmatch(readme)
+	if m == nil {
+		t.Fatal("found no `opkg install` line mentioning kmod-xfrm-interface")
+	}
+	pkgs := strings.Fields(m[1])
+	if !slices.Contains(pkgs, "ip-full") {
+		t.Errorf("the IKEv2 install list is %v, with no ip-full. A fresh router following"+
+			" these instructions fails at the first `ip link add type xfrm`.", pkgs)
+	}
+	// netifd's proto xfrm, which gotun-ipsec.init deliberately does not use.
+	if slices.Contains(pkgs, "xfrm") {
+		t.Errorf("the install list includes the `xfrm` package, which only adds netifd's"+
+			" proto xfrm to /etc/config/network. gotun-ipsec.init owns the device itself"+
+			" on purpose, so this package is not wanted: %v", pkgs)
+	}
+}
