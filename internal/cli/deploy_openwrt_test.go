@@ -19,6 +19,7 @@ package cli
 // is that the house has no internet after a reboot.
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/policy"
 )
 
@@ -575,5 +577,128 @@ func TestIKEv2InstallListIncludesIPFull(t *testing.T) {
 		t.Errorf("the install list includes the `xfrm` package, which only adds netifd's"+
 			" proto xfrm to /etc/config/network. gotun-ipsec.init owns the device itself"+
 			" on purpose, so this package is not wanted: %v", pkgs)
+	}
+}
+
+// --- A14: the config schema must match the flags and the documentation ------
+
+// internal/deployconf names a flag for each setting. A name that does not
+// resolve is a setting that silently does nothing -- the same failure the shell
+// mapping had, moved into Go, which would be the worst possible outcome of
+// replacing one with the other.
+func TestSchemaFlagsResolve(t *testing.T) {
+	fs := watchFlagSet()
+	for key, name := range deployconf.WatchFlags {
+		if lookup(fs, name) == nil {
+			t.Errorf("deployconf maps %s to -%s, which `gotun watch` does not define", key, name)
+		}
+	}
+}
+
+// The schema is now the single source of truth for what gotun.conf may contain,
+// so the example must agree with it exactly. One direction catches a setting
+// nobody can discover; the other catches a documented knob that does nothing.
+func TestSchemaMatchesTheExample(t *testing.T) {
+	documented := assignedVars(readDeploy(t, "gotun.conf.example"))
+	known := deployconf.GotunConf.Keys()
+
+	for _, k := range known {
+		if !slices.Contains(documented, k) {
+			t.Errorf("the schema accepts %s but gotun.conf.example does not document it,"+
+				" so an operator has no way to discover it", k)
+		}
+	}
+	for _, k := range documented {
+		if !slices.Contains(known, k) {
+			t.Errorf("gotun.conf.example documents %s but the schema rejects it,"+
+				" so copying the example produces a config gotun refuses", k)
+		}
+	}
+}
+
+func TestDNSSchemaMatchesItsExample(t *testing.T) {
+	documented := assignedVars(readDeploy(t, "gotun-dns.conf.example"))
+	known := deployconf.GotunDNSConf.Keys()
+	for _, k := range known {
+		if !slices.Contains(documented, k) {
+			t.Errorf("the DNS schema accepts %s, undocumented in gotun-dns.conf.example", k)
+		}
+	}
+	for _, k := range documented {
+		if !slices.Contains(known, k) {
+			t.Errorf("gotun-dns.conf.example documents %s, which the DNS schema rejects", k)
+		}
+	}
+}
+
+// --- A15: Validate must classify its own errors ----------------------------
+
+// watch keeps running after a failed apply, because at boot the usual cause is
+// a transport that is not up yet and the watchdog recovers on its own. It can
+// only do that safely if a configuration that will never work is distinguished
+// from one that is merely early, so these two sets must not blur.
+func TestValidate_ConfigProblemsAreConfigErrors(t *testing.T) {
+	prefixes := filepath.Join(t.TempDir(), "prefixes.txt")
+	if err := os.WriteFile(prefixes, []byte("77.88.8.0/24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := ApplyOptions{PrefixesPath: prefixes, Endpoint: "185.80.130.211", MarkIfaceCSV: "br-lan"}
+
+	for _, c := range []struct {
+		name string
+		edit func(*ApplyOptions)
+	}{
+		{"no prefix list", func(o *ApplyOptions) { o.PrefixesPath = "" }},
+		{"prefix list missing", func(o *ApplyOptions) { o.PrefixesPath = "/nope.txt" }},
+		{"no endpoint", func(o *ApplyOptions) { o.Endpoint = "" }},
+		{"endpoint is not an address", func(o *ApplyOptions) { o.Endpoint = "vpn.example" }},
+		{"lan is not a prefix", func(o *ApplyOptions) { o.LANCSV = "192.168.8.1" }},
+		{"direct-src is not a host", func(o *ApplyOptions) { o.DirectSrcCSV = "nonsense" }},
+		{"non-routable is not a prefix", func(o *ApplyOptions) { o.NonRoutableCSV = "nonsense" }},
+		{"wg config missing", func(o *ApplyOptions) { o.WGConfig = "/nope.conf" }},
+		{
+			// The policy itself refuses this: a clients interface absent from
+			// the ingress guard means those clients are never classified.
+			name: "clients interface not marked",
+			edit: func(o *ApplyOptions) { o.ClientsIfaceCSV = "ipsec0"; o.MarkIfaceCSV = "br-lan" },
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := base
+			c.edit(&o)
+			_, err := Validate(o)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			var ce ConfigError
+			if !errors.As(err, &ce) {
+				t.Errorf("want a ConfigError so watch treats it as fatal, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestValidate_AcceptsAUsableConfiguration(t *testing.T) {
+	prefixes := filepath.Join(t.TempDir(), "prefixes.txt")
+	if err := os.WriteFile(prefixes, []byte("77.88.8.0/24\n5.255.255.0/24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Validate(ApplyOptions{
+		PrefixesPath:    prefixes,
+		Endpoint:        "185.80.130.211",
+		LANCSV:          "192.168.8.0/24",
+		MarkIfaceCSV:    "br-lan,ipsec0",
+		ClientsIfaceCSV: "ipsec0",
+		TunnelIface:     "xray0",
+		FailMode:        policy.FailOpen,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TunnelInterface != "xray0" {
+		t.Errorf("TunnelInterface = %q", p.TunnelInterface)
+	}
+	if len(p.DirectPrefixes) != 2 {
+		t.Errorf("got %d direct prefixes, want 2", len(p.DirectPrefixes))
 	}
 }

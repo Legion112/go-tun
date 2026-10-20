@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"net/netip"
 	"os"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/legion/go-tun/internal/amnezia"
 	"github.com/legion/go-tun/internal/apply"
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/linux"
 	"github.com/legion/go-tun/internal/policy"
 	"github.com/legion/go-tun/internal/prefixes"
@@ -145,32 +147,84 @@ func splitCSV(csv string) []string {
 	return out
 }
 
-func Apply(o ApplyOptions) error {
+// loadConfigInto fills in, from the configuration file, every flag in m that
+// the operator did not pass explicitly. An empty path is not an error: the file
+// is optional and every flag has a default.
+//
+// This replaces the mapping the init scripts used to do in shell, where each
+// parameter was named a third time -- once as documentation, once as a flag,
+// once in Go -- with nothing checking the three agreed.
+func loadConfigInto(fs *flag.FlagSet, path string, m deployconf.Mapping) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	conf, err := deployconf.Load(path, deployconf.GotunConf)
+	if err != nil {
+		return ConfigError{Err: err}
+	}
+	if err := conf.Into(fs, m); err != nil {
+		return ConfigError{Err: err}
+	}
+	return nil
+}
+
+// ConfigError is a configuration that cannot work: a file that is not there, a
+// value that does not parse, a policy that does not compile.
+//
+// The distinction earns its keep in `watch`. A failed apply at boot is usually
+// the transport not being up yet, which the watchdog recovers from on its own --
+// so watch logs it and carries on. A failed apply because the configuration is
+// wrong will fail identically forever, and carrying on would mean procd
+// restarting the service every five seconds for as long as nobody looks.
+type ConfigError struct{ Err error }
+
+func (e ConfigError) Error() string { return e.Err.Error() }
+func (e ConfigError) Unwrap() error { return e.Err }
+
+func cfgErrf(format string, a ...any) error {
+	return ConfigError{Err: fmt.Errorf(format, a...)}
+}
+
+// Validate turns ApplyOptions into a policy, or says why it cannot.
+//
+// It is everything apply does before it writes anything, split out so `check`
+// can run exactly the same checks without touching the system -- which is what
+// makes `gotun check -config` a command an operator can trust, unlike
+// `/etc/init.d/gotun start`, whose exit status rc.common discards.
+//
+// Not every error here is a ConfigError, deliberately.
+// linux.InterfacesForPrefixes and probeTunnelIPv6 read live kernel state, and a
+// LAN bridge or a tunnel device that is not up yet at boot is transient. Calling
+// that a configuration error would put the gateway back in the respawn loop
+// this split exists to end.
+func Validate(o ApplyOptions) (policy.Policy, error) {
 	prefixesPath, endpoint := o.PrefixesPath, o.Endpoint
 	wgConfig, wgClientsConfig, lanCSV := o.WGConfig, o.WGClientsConfig, o.LANCSV
 	tunnelUp, directSNAT := o.TunnelUp, o.DirectSNAT
 	if prefixesPath == "" {
-		return fmt.Errorf("-prefixes is required")
+		return policy.Policy{}, cfgErrf("-prefixes is required")
 	}
 	if endpoint == "" {
-		return fmt.Errorf("-endpoint is required")
+		return policy.Policy{}, cfgErrf("-endpoint is required")
 	}
 	var eps []netip.Addr
 	for _, part := range splitCSV(endpoint) {
 		a, err := netip.ParseAddr(part)
 		if err != nil {
-			return fmt.Errorf("endpoint %q: %w", part, err)
+			return policy.Policy{}, cfgErrf("endpoint %q: %w", part, err)
 		}
 		eps = append(eps, a)
 	}
 	if len(eps) == 0 {
-		return fmt.Errorf("-endpoint is required")
+		return policy.Policy{}, cfgErrf("-endpoint is required")
 	}
 
 	var prefs []netip.Prefix
 	st, err := os.Stat(prefixesPath)
 	if err != nil {
-		return err
+		// Named, because the bare stat error says a path is missing without
+		// saying which setting put it there.
+		return policy.Policy{}, cfgErrf("-prefixes %s: %w", prefixesPath, err)
 	}
 	if st.IsDir() {
 		prefs, err = prefixes.ParseMaxMindCountryDir(prefixesPath, "RU")
@@ -178,31 +232,32 @@ func Apply(o ApplyOptions) error {
 		prefs, err = prefixes.ParseCIDRFile(prefixesPath)
 	}
 	if err != nil {
-		return err
+		return policy.Policy{}, cfgErrf("-prefixes %s: %w", prefixesPath, err)
 	}
 	prefs = prefixes.Collapse(prefs)
 
 	var lans []netip.Prefix
 	if lanCSV != "" {
-		for _, p := range strings.Split(lanCSV, ",") {
-			p = strings.TrimSpace(p)
-			if p == "" {
+		for _, q := range strings.Split(lanCSV, ",") {
+			q = strings.TrimSpace(q)
+			if q == "" {
 				continue
 			}
-			pref, err := netip.ParsePrefix(p)
+			pref, err := netip.ParsePrefix(q)
 			if err != nil {
-				return err
+				return policy.Policy{}, ConfigError{Err: err}
 			}
 			lans = append(lans, pref)
 		}
 	}
 
+	// Live state, so not a ConfigError: see the doc comment.
 	lanIfaces, err := linux.InterfacesForPrefixes(lans)
 	if err != nil {
-		return err
+		return policy.Policy{}, err
 	}
 	if directSNAT && len(lanIfaces) == 0 {
-		fmt.Fprintln(os.Stderr, "gotun apply: -direct-snat requested but no interface matched -lan; direct traffic will NOT be masqueraded")
+		fmt.Fprintln(os.Stderr, "gotun: -direct-snat requested but no interface matched -lan; direct traffic will NOT be masqueraded")
 	}
 
 	p := policy.Policy{
@@ -227,7 +282,7 @@ func Apply(o ApplyOptions) error {
 	if ds := strings.TrimSpace(o.DirectSrcCSV); ds != "" {
 		srcs, err := parseHostCSV(ds)
 		if err != nil {
-			return err
+			return policy.Policy{}, ConfigError{Err: err}
 		}
 		p.DirectSources = srcs
 	}
@@ -242,7 +297,7 @@ func Apply(o ApplyOptions) error {
 	if nr := strings.TrimSpace(o.NonRoutableCSV); nr != "" {
 		extra, err := parsePrefixCSV(nr)
 		if err != nil {
-			return err
+			return policy.Policy{}, ConfigError{Err: err}
 		}
 		p.NonRoutablePrefixes = extra
 	} else {
@@ -250,18 +305,18 @@ func Apply(o ApplyOptions) error {
 	}
 
 	if len(p.MarkIIfNames) == 0 {
-		fmt.Fprintln(os.Stderr, "gotun apply: -mark-iface is empty, so traffic arriving on ANY interface is classified;"+
+		fmt.Fprintln(os.Stderr, "gotun: -mark-iface is empty, so traffic arriving on ANY interface is classified;"+
 			" on a router pass the client-facing interface(s)")
 	}
 	if p.FailMode == policy.FailOpen {
-		fmt.Fprintln(os.Stderr, "gotun apply: fail-mode=open -- if the tunnel becomes unusable, marked traffic will"+
+		fmt.Fprintln(os.Stderr, "gotun: fail-mode=open -- if the tunnel becomes unusable, marked traffic will"+
 			" SILENTLY egress the uplink instead. Check egress identity to detect it.")
 	}
 
 	if wgConfig != "" {
 		cfg, err := loadWGQuick(wgConfig)
 		if err != nil {
-			return err
+			return policy.Policy{}, ConfigError{Err: err}
 		}
 		p.WireGuard = cfg
 		p.TunnelCarriesIPv6 = cfg.CarriesIPv6()
@@ -274,24 +329,38 @@ func Apply(o ApplyOptions) error {
 	if wgClientsConfig != "" {
 		cfg, err := loadWGQuick(wgClientsConfig)
 		if err != nil {
-			return err
+			return policy.Policy{}, ConfigError{Err: err}
 		}
 		p.InboundWireGuard = cfg
+	}
+
+	// Compiled here to validate, and to surface the warnings. Every path that
+	// leaves IPv6 unclassified is a silent leak rather than a visible failure,
+	// so it has to be said out loud before the apply, not discovered later.
+	//
+	// Reconcile compiles again. That is a few milliseconds of duplicated work
+	// in exchange for one definition of "valid" shared by apply, watch and
+	// check, which is the trade this split is for.
+	cst, err := policy.Compile(p)
+	if err != nil {
+		return policy.Policy{}, ConfigError{Err: err}
+	}
+	for _, w := range cst.Warnings {
+		fmt.Fprintln(os.Stderr, "gotun: "+w)
+	}
+	return p, nil
+}
+
+func Apply(o ApplyOptions) error {
+	p, err := Validate(o)
+	if err != nil {
+		return err
 	}
 
 	var runner linux.Runner = linux.ExecRunner{}
 	dry := &linux.DryRunner{Inner: linux.ExecRunner{}, Out: os.Stdout}
 	if o.DryRun {
 		runner = dry
-	}
-
-	// Compile once up front purely to surface its warnings. Every path that
-	// leaves IPv6 unclassified is a silent leak rather than a visible failure,
-	// so it has to be said out loud before the apply, not discovered later.
-	if st, err := policy.Compile(p); err == nil {
-		for _, w := range st.Warnings {
-			fmt.Fprintln(os.Stderr, "gotun apply: "+w)
-		}
 	}
 
 	res, err := apply.Reconcile(runner, p)

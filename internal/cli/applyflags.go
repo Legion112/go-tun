@@ -20,6 +20,7 @@ type applyFlags struct {
 	markIface, dryRun               *string
 	tunnelIface, nonRoutable        *string
 	directSrc, clientsIface         *string
+	configPath                      *string
 }
 
 func registerApplyFlags(fs *flag.FlagSet) *applyFlags {
@@ -65,6 +66,10 @@ func registerApplyFlags(fs *flag.FlagSet) *applyFlags {
 				" WireGuard interface, the xfrm interface an IKEv2 CHILD_SA surfaces on, or both"+
 				" at once. gotun holds no credential for them; each must also appear in"+
 				" -mark-iface, or clients on it get no split routing at all"),
+		configPath: fs.String("config", "",
+			"read settings from this /etc/gotun/gotun.conf-style file. A flag passed explicitly"+
+				" wins over the file, and a setting the file omits keeps its default here rather"+
+				" than being overridden with an empty value"),
 		nonRoutable: fs.String("non-routable", "",
 			"extra destinations never to mark (comma-separated CIDRs); defaults to private, CGNAT, link-local, loopback and multicast space"),
 	}

@@ -60,6 +60,14 @@ func registerWatchFlags(fs *flag.FlagSet) (*applyFlags, *watchFlags) {
 	return f, w
 }
 
+// registerWatchFlagsOnly is registerWatchFlags for a command that needs the
+// same flags but none of the watchFlags half -- `check`, which validates what
+// `watch` would run with.
+func registerWatchFlagsOnly(fs *flag.FlagSet) *applyFlags {
+	f, _ := registerWatchFlags(fs)
+	return f
+}
+
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	f, w := registerWatchFlags(fs)
