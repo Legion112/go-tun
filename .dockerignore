@@ -1,0 +1,16 @@
+# The build needs go.mod, go.sum, cmd/ and internal/ -- nothing else. Without
+# this file `COPY . .` hands the daemon ~190MB, almost all of it the MMDB in
+# data/ and the cross-compiled binaries in bin/, both of which are gitignored
+# and neither of which any image uses.
+.git
+.github
+data
+bin
+output
+prefixes.txt
+*.mmdb
+*.key
+
+# Docs and plans: not inputs to any build.
+*.md
+!deploy/openwrt/README.md
