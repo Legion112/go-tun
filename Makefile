@@ -9,7 +9,7 @@ MMDB := data/geo/GeoIP2-City.mmdb
 
 FUZZTIME ?= 30s
 
-.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy verify-router fetch-prefixes clean
+.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy verify-router check-router fetch-prefixes clean
 
 all: build test
 
@@ -78,38 +78,85 @@ docker-build-openwrt: docker-build
 # verify-router is read-only: it reads the live gateway and changes nothing.
 #
 # It is the pre-deploy gate the container tests cannot be. The lab runs amd64
-# against a container with no netifd and no fw3; the gateway is aarch64 with
-# both. What is actually likely to take the household offline is the binary
-# being for the wrong architecture or the live config having drifted, and
-# neither is something a container can tell you about.
+# while the gateway is aarch64, so what is actually likely to take the household
+# offline is the binary being for the wrong architecture or the live config
+# having drifted, and neither is something a container can tell you about.
+#
+# Every read is tolerant of its object being absent, and the target always
+# completes. That is deliberate: this is a report, and the first version of it
+# aborted on `ip -6 route show table 100` -- which exits non-zero on a box with
+# no IPv6 routes in that table, i.e. the normal case -- and so stopped before
+# printing the nft table and the service states, which are the useful half.
+# The gate is `gotun check` on its own; this prints its verdict and carries on.
 #
 # ROUTER overrides the host: make verify-router ROUTER=root@192.168.8.1
 ROUTER ?= root@flint2
+SSH ?= ssh -o BatchMode=yes -o ConnectTimeout=10
+
+define rsay
+	@echo; echo "== $(1) =="
+endef
+
+# check-router stages the aarch64 binary in /tmp and runs `gotun check` with it
+# against the live config, then removes it. Nothing is installed and nothing on
+# the router changes.
+#
+# This is the pre-deploy gate, and it closes the one gap the container lab
+# cannot: everything there runs amd64 while the gateway is aarch64, so "it
+# compiles" was all that had ever been established about the binary that
+# actually ships. This runs it on the real CPU against the real file.
+check-router: build-arm64
+	@echo "== staging $(GOTUN_ARM64) on $(ROUTER), nothing installed =="
+	@scp -O -q $(GOTUN_ARM64) $(ROUTER):/tmp/gotun-precheck
+	@$(SSH) $(ROUTER) 'chmod +x /tmp/gotun-precheck && /tmp/gotun-precheck check -config /etc/gotun/gotun.conf'; \
+		rc=$$?; $(SSH) $(ROUTER) 'rm -f /tmp/gotun-precheck'; \
+		if [ $$rc -eq 0 ]; then echo; echo "  -> this binary runs on the router and accepts its live config"; \
+		else echo; echo "  -> REFUSED (exit $$rc). Do not deploy until this passes."; fi; \
+		exit $$rc
 
 verify-router:
-	@echo "== gotun check against the live config =="
-	@ssh $(ROUTER) 'gotun check -config /etc/gotun/gotun.conf' || true
-	@echo
-	@echo "== ip rule =="
-	@ssh $(ROUTER) 'ip rule show'
-	@echo
-	@echo "== table 100 =="
-	@ssh $(ROUTER) 'ip route show table 100; ip -6 route show table 100'
-	@echo
-	@echo "== nft table inet gotun =="
-	@ssh $(ROUTER) 'nft list table inet gotun | head -40'
-	@echo
-	@echo "== services =="
-	@ssh $(ROUTER) 'for s in gotun gotun-dns gotun-ipsec singbox; do \
-		printf "%-12s " $$s; \
+	$(call rsay,architecture and release)
+	@$(SSH) $(ROUTER) 'uname -m; sed -n "s/^DISTRIB_DESCRIPTION=//p" /etc/openwrt_release' || true
+	$(call rsay,gotun check against the live config)
+	@$(SSH) $(ROUTER) 'gotun check -config /etc/gotun/gotun.conf' \
+		&& echo "  -> the live config is usable by this binary" \
+		|| echo "  -> CHECK FAILED, or this gotun predates the check subcommand; see above"
+	$(call rsay,ip rule)
+	@$(SSH) $(ROUTER) 'ip rule show; ip -6 rule show' || true
+	$(call rsay,table 100)
+	@$(SSH) $(ROUTER) 'ip route show table 100 || true; ip -6 route show table 100 || true' || true
+	$(call rsay,nft table inet gotun)
+	@$(SSH) $(ROUTER) 'nft list table inet gotun 2>&1 | head -30' || true
+	@$(SSH) $(ROUTER) 'nft -t list set inet gotun ru_nets 2>/dev/null | grep -c . >/dev/null \
+		&& echo "  ru_nets elements: $$(nft list set inet gotun ru_nets 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+" | wc -l)"' || true
+	# Supervised services only. gotun-ipsec and fw3 are one-shot -- they do
+	# their work and exit -- so asking procd whether they are "running" reads
+	# as a fault when it is the normal state. Their effect is reported below
+	# instead, which is the thing that actually matters.
+	$(call rsay,supervised services)
+	@$(SSH) $(ROUTER) 'for s in gotun gotun-dns singbox network; do \
+		printf "  %-12s " $$s; \
 		if [ -x /etc/init.d/$$s ]; then \
-			/etc/init.d/$$s enabled >/dev/null 2>&1 && printf "enabled " || printf "disabled "; \
+			/etc/init.d/$$s enabled >/dev/null 2>&1 && printf "enabled  " || printf "disabled "; \
 			ubus -S call service list "{\"name\":\"$$s\"}" 2>/dev/null | grep -q "\"running\":true" \
-				&& echo running || echo "not running"; \
-		else echo "not installed"; fi; done'
+				&& echo running || echo "NOT RUNNING"; \
+		else echo "not installed"; fi; done' || true
+	$(call rsay,one-shot services, by their effect)
+	@$(SSH) $(ROUTER) 'printf "  %-20s " "gotun-ipsec"; \
+		/etc/init.d/gotun-ipsec enabled >/dev/null 2>&1 && printf "enabled  " || printf "disabled "; \
+		ip -br link show 2>/dev/null | grep -qE "^ipsec[0-9]" \
+			&& echo "device present" || echo "NO DEVICE"; \
+		printf "  %-20s " "firewall"; \
+		/etc/init.d/firewall enabled >/dev/null 2>&1 && printf "enabled  " || printf "disabled "; \
+		n=$$(iptables -S 2>/dev/null | grep -c zone_); \
+		[ "$$n" -gt 0 ] && echo "$$n zone rules" || echo "NO RULES"' || true
+	$(call rsay,interfaces)
+	@$(SSH) $(ROUTER) 'ip -br link show | grep -E "xray|ipsec|wg|br-lan" || echo "  none"' || true
+	$(call rsay,hotplug hooks installed)
+	@$(SSH) $(ROUTER) 'ls -l /etc/hotplug.d/iface/*gotun* /etc/hotplug.d/net/*gotun* 2>&1 | sed "s/^/  /"' || true
+	$(call rsay,firewall backend)
+	@$(SSH) $(ROUTER) 'command -v fw4 >/dev/null && echo "  fw4 (nftables)" || { command -v fw3 >/dev/null && echo "  fw3 (iptables)" || echo "  neither"; }' || true
 	@echo
-	@echo "== tunnel device =="
-	@ssh $(ROUTER) 'ip -br link show | grep -E "xray|ipsec|wg" || echo "none"'
 
 fetch-prefixes: build
 	@if [ -f "$(MMDB)" ]; then \

@@ -56,7 +56,16 @@ success. The service is not running, nothing says so, and the next incident gets
 diagnosed from that. `gotun check` is the command with an honest exit status,
 which is also why `gotun.init` runs it as a pre-flight on every start.
 
-From the working tree, `make verify-router` does the same check against the live
+From the working tree there are two read-only targets, and neither changes
+anything on the router.
+
+`make check-router` stages the aarch64 binary in `/tmp`, runs `gotun check` with
+it against the live config, and removes it. This is the gate: it closes the one
+gap the container lab cannot, since everything there runs amd64 while the gateway
+is aarch64, so "it compiles" was all that had ever been established about the
+binary that actually ships.
+
+`make verify-router` does the same check against the live
 gateway and dumps the state that goes with it — the ip rule, table 100, the nft
 table, which services are enabled and running, and the tunnel device. It is
 read-only, and it is the gate worth running before and after any deploy: the
