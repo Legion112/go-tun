@@ -9,7 +9,7 @@ MMDB := data/geo/GeoIP2-City.mmdb
 
 FUZZTIME ?= 30s
 
-.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build fetch-prefixes clean
+.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy fetch-prefixes clean
 
 all: build test
 
@@ -54,14 +54,25 @@ fuzz:
 test-nft-real: docker-build
 	GOTUN_INTEGRATION=1 $(GO) test -count=1 -timeout 5m ./internal/linux/nftables/ -run 'RealNftRoundTrip'
 
-test-integration: docker-build test-nft-real
+test-integration: docker-build docker-build-openwrt test-nft-real
 	GOTUN_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 15m ./test/integration/...
+
+# Just the deploy lab, for iterating on deploy/openwrt/ without waiting for the
+# topology labs.
+test-deploy: docker-build-openwrt
+	GOTUN_INTEGRATION=1 $(GO) test -tags=integration -count=1 -timeout 15m ./test/integration/ -run OpenWrt
 
 test-large-set: docker-build
 	GOTUN_LARGE_SET=1 $(GO) test -count=1 -timeout 20m ./internal/linux/nftables/ -run 'LargeRUSet'
 
 docker-build:
 	docker build -t gotun:lab .
+
+# Depends on docker-build: the OpenWrt image copies its binaries out of
+# gotun:lab rather than rebuilding them, so both labs run byte-identical
+# binaries and this image costs no extra Go compilation.
+docker-build-openwrt: docker-build
+	docker build -t gotun:openwrt -f test/integration/openwrt/Dockerfile .
 
 fetch-prefixes: build
 	@if [ -f "$(MMDB)" ]; then \

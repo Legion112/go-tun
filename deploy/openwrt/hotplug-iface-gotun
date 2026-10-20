@@ -25,5 +25,21 @@ CONF=/etc/gotun/gotun.conf
 
 [ "$INTERFACE" = "${GOTUN_TUNNEL_IFACE:-wg-exit}" ] || exit 0
 
+# Only when the service is actually running, which is a different question from
+# `enabled` above: enabled means "starts at boot", so acting on that alone would
+# revive a service the operator had stopped on purpose -- the same failure the
+# enabled check was written to prevent, through a different door.
+ubus -S call service list '{"name":"gotun"}' 2>/dev/null \
+	| grep -q '"running": *true' || exit 0
+
 logger -t gotun "reapplying policy after ifup of $INTERFACE"
-/etc/init.d/gotun start
+
+# restart, not start. procd's start on an already-running service is a no-op, so
+# `start` here did nothing at all and the re-apply this hook exists to perform
+# never happened -- measured in the deploy lab. restart tears the policy down
+# and rebuilds it, which leaves a brief window with no policy; traffic uses the
+# uplink during it, which is better than a tunnel route that never comes back.
+#
+# The right fix is for the running watcher to be signalled to re-apply in place,
+# which is what `gotun hotplug` will do once watch takes -config.
+/etc/init.d/gotun restart

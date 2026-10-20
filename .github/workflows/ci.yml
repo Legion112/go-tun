@@ -69,8 +69,21 @@ jobs:
           sudo modprobe xfrm_interface
           lsmod | grep -q xfrm_interface || { echo "::error::xfrm_interface did not load"; exit 1; }
 
+      # The deploy lab stands in for the sing-box tun with a dummy device. Same
+      # reasoning as above: without the module those scenarios cannot run.
+      - name: dummy interface support
+        run: |
+          sudo modprobe dummy
+          lsmod | grep -q dummy || { echo "::error::dummy did not load"; exit 1; }
+
       - name: build the lab image
         run: make docker-build
+
+      # The deploy lab's own image: real OpenWrt with procd as PID 1, and
+      # nftables-nojson, which is what exercises gotun's text nft readback
+      # path. Nothing else in the suite touches that path.
+      - name: build the openwrt lab image
+        run: make docker-build-openwrt
 
       # The real-nft round trips live outside the path test-integration walks,
       # so they get their own step.

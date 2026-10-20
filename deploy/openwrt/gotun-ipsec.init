@@ -71,5 +71,13 @@ start() {
 
 stop() {
 	load_config
-	ip link del "$IFACE" 2>/dev/null
+
+	# Checked rather than `|| true`, so that stopping a service that is already
+	# stopped succeeds while a genuine failure to remove an existing device
+	# still reports one. `ip link del` on a missing device exits non-zero, and
+	# as the last command of stop() that made every repeat stop -- and every
+	# shutdown after the device was already gone -- report failure.
+	if ip link show "$IFACE" >/dev/null 2>&1; then
+		ip link del "$IFACE"
+	fi
 }

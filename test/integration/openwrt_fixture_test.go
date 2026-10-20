@@ -466,3 +466,41 @@ func (o *owLab) waitNewServicePID(t *testing.T, name string, was int) int {
 		})
 	return pid
 }
+
+// applyFailures counts the failed initial applies in syslog.
+//
+// This is how a procd respawn loop is observed. Sampling the supervised pid
+// does not work: during a loop the instance spends most of its time inside
+// procd's respawn gap with no pid at all, so polling reads as "started once and
+// stable" -- the opposite of what is happening.
+func (o *owLab) applyFailures(t *testing.T) int {
+	t.Helper()
+	out := strings.TrimSpace(o.sh(t, "grep -c 'initial apply' /var/log/messages 2>/dev/null"))
+	if out == "" {
+		return 0
+	}
+	var n int
+	if _, err := fmt.Sscanf(out, "%d", &n); err != nil {
+		t.Fatalf("counting failed applies in syslog: %v (output %q)", err, out)
+	}
+	return n
+}
+
+// clearSyslog empties the log and verifies it, so that a later "nothing was
+// logged" assertion cannot pass because the clearing silently failed.
+//
+// It uses a shell redirect rather than truncate(1), which this image does not
+// have -- and because o.sh ignores exit status, a missing command fails
+// silently and leaves the previous subtest's messages in place. Three
+// "the hook must not fire" assertions passed their own clearing step that way
+// and reported the previous subtest's log line as a fresh hit.
+func (o *owLab) clearSyslog(t *testing.T) {
+	t.Helper()
+	if out, rc := o.shRC(t, ": > /var/log/messages"); rc != 0 {
+		t.Fatalf("could not empty the syslog file (rc=%d): %s", rc, out)
+	}
+	if n := strings.TrimSpace(o.sh(t, "wc -c < /var/log/messages")); n != "0" {
+		t.Fatalf("the syslog file is %s bytes after clearing it, so every assertion about"+
+			" what was or was not logged below would be reading stale lines", n)
+	}
+}

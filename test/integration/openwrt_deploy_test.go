@@ -504,3 +504,413 @@ func applyArgsFrom(conf string) string {
 		v["GOTUN_MARK_IFACE"], v["GOTUN_CLIENTS_IFACE"], v["GOTUN_FAIL_MODE"],
 		v["GOTUN_IPV6"], v["GOTUN_IPV6_FALLBACK"])
 }
+
+// TestOpenWrtDegradedStart measures what happens when the tunnel device does
+// not exist yet at start, which is the ordinary case on every reboot: gotun is
+// START=99 and sing-box is still coming up.
+//
+// gotun.init's header promises graceful degradation here. Half of that is true
+// and the half that is not costs real CPU on the router, so both halves are
+// pinned: whichever way the refactor resolves it, it has to argue with this
+// test rather than with a comment.
+func TestOpenWrtDegradedStart(t *testing.T) {
+	o := newOpenWrtNode(t, "degr")
+	o.writeConf(t, owConf) // names xray0, which is deliberately never created
+	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
+
+	// The promise that holds: the classifier goes in, and table 100 is left
+	// empty. An ip rule pointing at an empty table falls through to main, so
+	// traffic keeps flowing on the uplink -- degraded, not broken.
+	t.Run("the classifier is installed and traffic is not black-holed", func(t *testing.T) {
+		o.poll(t, "the nft table to appear", 30*time.Second, func() (bool, string) {
+			_, rc := o.shRC(t, "nft list table inet gotun >/dev/null 2>&1")
+			return rc == 0, ""
+		})
+		if !strings.Contains(o.sh(t, "ip rule show"), "100:") {
+			t.Error("no ip rule at priority 100, so nothing is classified at all")
+		}
+		out := o.sh(t, "ip route show table 100 2>&1")
+		if strings.Contains(out, "default") {
+			t.Errorf("table 100 has a default route although the tunnel device is absent: %q", out)
+		}
+	})
+
+	// The promise that does not hold. Watch returns an error from its initial
+	// apply, and `respawn 3600 5 0` has an unlimited retry count, so procd
+	// restarts it every five seconds for as long as the device stays missing --
+	// rebuilding the whole nft table each time, which on the router is some
+	// 17,000 set elements.
+	//
+	// It does self-heal: once the device appears, the next respawn succeeds.
+	// The cost is the interval before that, and the pathological case is a
+	// transport that never comes up at all.
+	t.Run("the service crash-loops instead of degrading", func(t *testing.T) {
+		// Counted from syslog, not by sampling the supervised pid. During a
+		// respawn loop the instance spends most of its time *not* running --
+		// it sits in procd's five-second gap -- so polling for a live pid
+		// catches nothing and would read as "started once, stable". The count
+		// of failed initial applies is direct evidence and cannot be missed.
+		first := o.applyFailures(t)
+		time.Sleep(11 * time.Second)
+		second := o.applyFailures(t)
+
+		t.Logf("failed initial applies: %d, then %d eleven seconds later", first, second)
+		if first == 0 {
+			t.Fatal("the initial apply did not fail at all, so this scenario is no longer" +
+				" measuring what it was written for -- re-read it before deleting it")
+		}
+		if second <= first {
+			t.Logf("note: the count stopped growing, so the service is no longer restarting." +
+				" If Watch has been changed to survive a failed initial apply, this scenario" +
+				" is now the regression guard for that and should assert a stable pid instead.")
+			return
+		}
+		// Roughly one attempt per five seconds, each one rebuilding the entire
+		// nft table -- on the router, some 17,000 set elements.
+		t.Logf("confirmed: procd is restarting gotun about every %.1fs and will keep doing so"+
+			" for as long as the device is missing, because `respawn 3600 5 0` has an"+
+			" unlimited retry count", 11.0/float64(second-first))
+	})
+
+	// And the recovery path, which is what makes the crash loop survivable
+	// rather than fatal: the device appearing is enough.
+	t.Run("it converges once the device appears", func(t *testing.T) {
+		o.sh(t, "ip link add xray0 type dummy && ip addr add 10.70.0.1/24 dev xray0"+
+			" && ip link set xray0 up")
+		o.poll(t, "table 100 to gain the tunnel route", 45*time.Second, func() (bool, string) {
+			out := o.sh(t, "ip route show table 100 2>&1")
+			return strings.Contains(out, "xray0"), out
+		})
+		// And the restarting stops, which is the other half of converging.
+		settled := o.applyFailures(t)
+		time.Sleep(7 * time.Second)
+		if now := o.applyFailures(t); now != settled {
+			t.Errorf("the initial apply is still failing after the device appeared"+
+				" (%d -> %d failures)", settled, now)
+		}
+	})
+}
+
+// TestOpenWrtHotplug drives the hook the way netifd does, through
+// /sbin/hotplug-call, so the filename ordering and the dispatch are the real
+// ones rather than a direct invocation of the script.
+func TestOpenWrtHotplug(t *testing.T) {
+	o := newOpenWrtNode(t, "hp")
+	o.writeConf(t, owConf)
+	o.sh(t, "ip link add xray0 type dummy && ip addr add 10.70.0.1/24 dev xray0"+
+		" && ip link set xray0 up")
+	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
+	o.waitServicePID(t, "gotun")
+	o.poll(t, "the initial policy", 30*time.Second, func() (bool, string) {
+		out := o.sh(t, "ip route show table 100")
+		return strings.Contains(out, "xray0"), out
+	})
+
+	ifup := func(iface string) string {
+		return fmt.Sprintf("ACTION=ifup INTERFACE=%s DEVICE=%s /sbin/hotplug-call iface", iface, iface)
+	}
+
+	// The reason the hook exists. A transport bounce has the kernel withdraw
+	// the device route from table 100, and only a re-apply puts it back; until
+	// then the gateway is a classifier that marks traffic into an empty table,
+	// so geo-routing has quietly stopped while everything still appears to work.
+	t.Run("ifup of the tunnel restores a withdrawn route", func(t *testing.T) {
+		o.sh(t, "ip route flush table 100")
+		if out := o.sh(t, "ip route show table 100 2>&1"); strings.Contains(out, "xray0") {
+			t.Fatalf("precondition: table 100 should be empty here, got %q", out)
+		}
+
+		o.sh(t, ifup("xray0"))
+		restored := false
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(o.sh(t, "ip route show table 100"), "xray0") {
+				restored = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !restored {
+			t.Error("ifup of the tunnel did not restore the route. The hook's last line is" +
+				" `/etc/init.d/gotun start`, and procd's start on a running service is a" +
+				" no-op -- so the re-apply the hook exists to perform never happens." +
+				" See TestOpenWrtLifecycle/start_on_a_running_service_is_a_no-op.")
+		}
+		if out := o.sh(t, "grep 'reapplying policy after ifup' /var/log/messages"); out == "" {
+			t.Error("the hook did not even log that it had fired, so it did not match the" +
+				" interface at all")
+		}
+	})
+
+	t.Run("an unrelated interface is ignored", func(t *testing.T) {
+		o.clearSyslog(t)
+		o.sh(t, ifup("lan"))
+		if out := o.sh(t, "grep -c 'reapplying policy' /var/log/messages"); strings.TrimSpace(out) != "0" {
+			t.Errorf("the hook reacted to an ifup of an unrelated interface (%q matches)", out)
+		}
+	})
+
+	t.Run("ifdown is ignored", func(t *testing.T) {
+		o.clearSyslog(t)
+		o.sh(t, "ACTION=ifdown INTERFACE=xray0 DEVICE=xray0 /sbin/hotplug-call iface")
+		if out := o.sh(t, "grep -c 'reapplying policy' /var/log/messages"); strings.TrimSpace(out) != "0" {
+			t.Errorf("the hook reacted to an ifdown (%q matches)", out)
+		}
+	})
+
+	// Without this gate the hook re-arms the policy on any ifup, including one
+	// done while debugging a dead tunnel -- which is how it once put every LAN
+	// client back onto a broken path after the operator had torn the policy
+	// down deliberately.
+	t.Run("a disabled service is left alone", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun stop && /etc/init.d/gotun disable")
+		t.Cleanup(func() { o.sh(t, "/etc/init.d/gotun enable") })
+		o.clearSyslog(t)
+
+		o.sh(t, ifup("xray0"))
+		if out := o.sh(t, "grep -c 'reapplying policy' /var/log/messages"); strings.TrimSpace(out) != "0" {
+			t.Errorf("the hook fired for a disabled service (%q matches)", out)
+		}
+	})
+}
+
+// TestOpenWrtDNS covers gotun-dns's one deployment-specific decision.
+func TestOpenWrtDNS(t *testing.T) {
+	o := newOpenWrtNode(t, "dns")
+
+	// The trip-wire for the refactor. gotun-dns's own default is :53, and
+	// 127.0.0.2:53 exists only as a shell fallback in the init script -- so the
+	// moment that mapping moves into Go without carrying the override, this
+	// service starts binding the address dnsmasq already owns. dnsmasq is
+	// started here deliberately to make the collision real rather than
+	// hypothetical.
+	t.Run("it does not collide with dnsmasq on port 53", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/dnsmasq start")
+		o.poll(t, "dnsmasq to own :53", 30*time.Second, func() (bool, string) {
+			out := o.sh(t, "netstat -lnup 2>/dev/null | grep ':53 '")
+			return strings.Contains(out, "dnsmasq"), out
+		})
+
+		o.sh(t, "/etc/init.d/gotun-dns enable && /etc/init.d/gotun-dns start")
+		pid := o.waitServicePID(t, "gotun-dns")
+		t.Logf("gotun-dns supervised pid %d", pid)
+
+		listeners := o.sh(t, "netstat -lnup 2>/dev/null | grep ':53 '")
+		if !strings.Contains(listeners, "127.0.0.2:53") {
+			t.Errorf("gotun-dns is not listening on 127.0.0.2:53:\n%s", listeners)
+		}
+		if strings.Contains(listeners, "0.0.0.0:53") {
+			t.Errorf("something bound 0.0.0.0:53, which is dnsmasq's address on this box:\n%s",
+				listeners)
+		}
+	})
+
+	t.Run("its own config file is honoured", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun-dns stop")
+		o.write(t, "/etc/gotun/gotun-dns.conf", "GOTUN_DNS_LISTEN=127.0.0.3:5353\n")
+		o.sh(t, "/etc/init.d/gotun-dns start")
+		o.waitServicePID(t, "gotun-dns")
+
+		o.poll(t, "the configured address to be bound", 20*time.Second, func() (bool, string) {
+			out := o.sh(t, "netstat -lnup 2>/dev/null | grep ':5353 '")
+			return strings.Contains(out, "127.0.0.3:5353"), out
+		})
+	})
+}
+
+// TestOpenWrtIPsec covers the xfrm device the IKEv2 CHILD_SA surfaces on.
+func TestOpenWrtIPsec(t *testing.T) {
+	o := newOpenWrtNode(t, "ipsec")
+	o.writeConf(t, owConf)
+
+	t.Run("start creates the device from the config", func(t *testing.T) {
+		if out, rc := o.shRC(t, "/etc/init.d/gotun-ipsec start 2>&1"); rc != 0 {
+			t.Fatalf("start failed (rc=%d): %s", rc, out)
+		}
+		out := o.sh(t, "ip -d link show ipsec0")
+		if !strings.Contains(out, "xfrm") {
+			t.Fatalf("ipsec0 is not an xfrm device:\n%s", out)
+		}
+		if !strings.Contains(out, "if_id 0x61") {
+			t.Errorf("want if_id 0x61 in:\n%s", out)
+		}
+		if !strings.Contains(out, "mtu 1400") {
+			t.Errorf("want mtu 1400 in:\n%s", out)
+		}
+		// The address is load-bearing: charon installs no route for an xfrm
+		// interface, so without an on-link prefix every reply to a client fails
+		// source address selection while the SA still reads ESTABLISHED.
+		if addr := o.sh(t, "ip -o -4 addr show dev ipsec0"); !strings.Contains(addr, "10.231.17.1/24") {
+			t.Errorf("want 10.231.17.1/24 on ipsec0, got %q", addr)
+		}
+	})
+
+	// The config used to be read at file scope, before start() sourced it, so
+	// every GOTUN_IPSEC_* value an operator set was silently ignored and the
+	// script used its own defaults. Nothing announced it: the device came up,
+	// just not the one that was asked for.
+	t.Run("non-default values from the config take effect", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun-ipsec stop")
+		conf := confWith("GOTUN_IPSEC_IFACE", "ipsec9")
+		conf = strings.ReplaceAll(conf, "GOTUN_IPSEC_IFID=0x61", "GOTUN_IPSEC_IFID=0x62")
+		conf = strings.ReplaceAll(conf, "GOTUN_IPSEC_ADDR=10.231.17.1/24", "GOTUN_IPSEC_ADDR=10.231.18.1/24")
+		conf = strings.ReplaceAll(conf, "GOTUN_IPSEC_MTU=1400", "GOTUN_IPSEC_MTU=1380")
+		o.writeConf(t, conf)
+
+		if out, rc := o.shRC(t, "/etc/init.d/gotun-ipsec start 2>&1"); rc != 0 {
+			t.Fatalf("start failed (rc=%d): %s", rc, out)
+		}
+		out := o.sh(t, "ip -d link show ipsec9 2>&1")
+		for _, want := range []string{"xfrm", "if_id 0x62", "mtu 1380"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("want %q in:\n%s", want, out)
+			}
+		}
+		if addr := o.sh(t, "ip -o -4 addr show dev ipsec9"); !strings.Contains(addr, "10.231.18.1/24") {
+			t.Errorf("want 10.231.18.1/24 on ipsec9, got %q", addr)
+		}
+		// stop must resolve the same name start did, or it deletes nothing.
+		o.sh(t, "/etc/init.d/gotun-ipsec stop")
+		if _, rc := o.shRC(t, "ip link show ipsec9 2>/dev/null"); rc == 0 {
+			t.Error("stop left ipsec9 behind: it resolved a different interface name than" +
+				" start created, which happens when it does not read the config")
+		}
+		o.writeConf(t, owConf)
+	})
+
+	// A phone's live SA is bound to this device. Recreating it on every start
+	// would drop every established session, so a second start must reassert the
+	// address and MTU and leave the device itself alone.
+	t.Run("a second start does not disturb a live device", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun-ipsec start")
+		before := strings.Fields(o.sh(t, "cat /sys/class/net/ipsec0/ifindex"))
+		o.sh(t, "/etc/init.d/gotun-ipsec start")
+		after := strings.Fields(o.sh(t, "cat /sys/class/net/ipsec0/ifindex"))
+		if len(before) == 0 || len(after) == 0 || before[0] != after[0] {
+			t.Errorf("the device was recreated (ifindex %v -> %v); every established SA on it"+
+				" would have been dropped", before, after)
+		}
+	})
+
+	t.Run("stop removes it and is idempotent", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun-ipsec stop")
+		if _, rc := o.shRC(t, "ip link show ipsec0 2>/dev/null"); rc == 0 {
+			t.Error("ipsec0 survived stop")
+		}
+		if out, rc := o.shRC(t, "/etc/init.d/gotun-ipsec stop 2>&1"); rc != 0 {
+			t.Errorf("stopping an already-stopped service must succeed, got rc=%d: %s", rc, out)
+		}
+	})
+
+	// The xfrm device has to exist before anything routes into it.
+	t.Run("it starts before gotun in the boot order", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun-ipsec enable && /etc/init.d/gotun enable")
+		out := o.sh(t, "ls /etc/rc.d/ | grep -E 'gotun' | sort")
+		ipsec := strings.Index(out, "S89gotun-ipsec")
+		gotun := strings.Index(out, "S99gotun")
+		if ipsec < 0 || gotun < 0 {
+			t.Fatalf("expected both S89gotun-ipsec and S99gotun in:\n%s", out)
+		}
+		if ipsec > gotun {
+			t.Errorf("gotun-ipsec sorts after gotun, so the device would be created after the"+
+				" thing that routes into it:\n%s", out)
+		}
+	})
+}
+
+// TestOpenWrtSingbox covers singbox.init's two gates. sing-box itself is a
+// twenty-line fake: the subject is whether the init script refuses to start a
+// transport whose config is bad, not what sing-box does with a good one.
+func TestOpenWrtSingbox(t *testing.T) {
+	o := newOpenWrtNode(t, "sb")
+
+	installFake := func(checkRC int) {
+		o.write(t, "/usr/bin/sing-box", fmt.Sprintf(`#!/bin/sh
+printf ':%%s\n' "$@" >> /tmp/singbox.argv
+case "$1" in
+	check) exit %d ;;
+	run)   exec sleep infinity ;;
+esac
+exit 0
+`, checkRC))
+		o.sh(t, "chmod 0755 /usr/bin/sing-box; : > /tmp/singbox.argv")
+	}
+
+	t.Run("a missing config is refused", func(t *testing.T) {
+		installFake(0)
+		o.sh(t, "rm -f /etc/gotun/singbox.json")
+		out, _ := o.shRC(t, "/etc/init.d/singbox start 2>&1")
+		if pid := o.servicePID(t, "singbox"); pid != 0 {
+			t.Errorf("sing-box started (pid %d) with no config", pid)
+		}
+		if !strings.Contains(out, "missing") {
+			t.Errorf("the refusal does not say the config is missing: %q", out)
+		}
+	})
+
+	// The check gate is the only thing standing between a bad config and a
+	// transport that comes up at boot and routes nothing.
+	t.Run("a config sing-box rejects is refused", func(t *testing.T) {
+		installFake(1)
+		o.write(t, "/etc/gotun/singbox.json", "{}")
+		out, _ := o.shRC(t, "/etc/init.d/singbox start 2>&1")
+		if pid := o.servicePID(t, "singbox"); pid != 0 {
+			t.Errorf("sing-box started (pid %d) although check rejected its config", pid)
+		}
+		if !strings.Contains(out, "rejected") {
+			t.Errorf("the refusal does not mention the rejected config: %q", out)
+		}
+	})
+
+	t.Run("a good config starts it with the expected argv", func(t *testing.T) {
+		installFake(0)
+		o.write(t, "/etc/gotun/singbox.json", "{}")
+		o.sh(t, "/etc/init.d/singbox start")
+		o.waitServicePID(t, "singbox")
+
+		argv := o.sh(t, "grep -A2 '^:run$' /tmp/singbox.argv | tr -d ':' | tr '\\n' ' '")
+		if !strings.Contains(argv, "run") || !strings.Contains(argv, "-c") ||
+			!strings.Contains(argv, "/etc/gotun/singbox.json") {
+			t.Errorf("want `run -c /etc/gotun/singbox.json`, recorded %q", argv)
+		}
+	})
+}
+
+// TestOpenWrtHotplugDoesNotRevive is the other half of the hook's gate, split
+// out because it needs the service enabled and stopped, which the scenarios in
+// TestOpenWrtHotplug deliberately leave running.
+//
+// The hook re-applies with `restart`, since procd's start on a running service
+// is a no-op. That makes the `enabled` check insufficient on its own: enabled
+// means "starts at boot", so a service the operator stopped on purpose -- to
+// debug a dead tunnel, say -- is still enabled, and restarting it on any ifup
+// would put every LAN client back onto the path the operator had just torn
+// down. Which is exactly the failure the enabled check was written to prevent.
+func TestOpenWrtHotplugDoesNotRevive(t *testing.T) {
+	o := newOpenWrtNode(t, "hprev")
+	o.writeConf(t, owConf)
+	o.sh(t, "ip link add xray0 type dummy && ip addr add 10.70.0.1/24 dev xray0"+
+		" && ip link set xray0 up")
+	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
+	o.waitServicePID(t, "gotun")
+
+	// Stopped on purpose, and left enabled -- which is what `stop` does.
+	o.sh(t, "/etc/init.d/gotun stop")
+	o.poll(t, "gotun to be stopped", 30*time.Second, func() (bool, string) {
+		return o.servicePID(t, "gotun") == 0, ""
+	})
+	if _, rc := o.shRC(t, "/etc/init.d/gotun enabled"); rc != 0 {
+		t.Fatal("precondition: stop should leave the service enabled")
+	}
+	o.clearSyslog(t)
+
+	o.sh(t, "ACTION=ifup INTERFACE=xray0 DEVICE=xray0 /sbin/hotplug-call iface")
+	time.Sleep(2 * time.Second)
+
+	if pid := o.servicePID(t, "gotun"); pid != 0 {
+		t.Errorf("the hook revived a service the operator had stopped (pid %d)", pid)
+	}
+	if out := o.sh(t, "grep -c 'reapplying policy' /var/log/messages"); strings.TrimSpace(out) != "0" {
+		t.Errorf("the hook re-applied the policy for a stopped service (%q matches)", out)
+	}
+}

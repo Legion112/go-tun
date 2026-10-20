@@ -8,10 +8,23 @@
 # unnoticed for its whole duration: the route stayed pointing into a tunnel that
 # swallowed every packet, and nothing was watching.
 #
-# START is late because the route needs the tunnel device to exist first. If it
-# does not yet, the apply still installs the classifier and leaves table 100
-# empty, which under fail-open means traffic uses the uplink -- degraded, not
-# broken -- until the transport comes up and the watchdog restores the route.
+# START is late because the route needs the tunnel device to exist first.
+#
+# If it does not exist yet -- the ordinary case on a reboot, while sing-box is
+# still coming up -- the apply does install the classifier and does leave table
+# 100 empty, so an ip rule pointing at an empty table falls through to main and
+# traffic keeps flowing on the uplink: degraded, not broken.
+#
+# But the process does not survive it. The route step fails, the initial apply
+# returns an error, watch exits, and `respawn 3600 5 0` has an unlimited retry
+# count -- so procd restarts it about every five seconds, rebuilding the whole
+# nft table (some 17,000 set elements here) each time, for as long as the device
+# is missing. Measured in the deploy lab; see TestOpenWrtDegradedStart. It does
+# self-heal the moment the device appears, and the pathological case is a
+# transport that never comes up at all.
+#
+# The fix belongs in watch, which should converge what it can and keep probing
+# rather than treat a missing device as fatal, and that is where -config lands.
 
 START=99
 STOP=10
