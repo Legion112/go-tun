@@ -129,10 +129,10 @@ verify-router:
 	@$(SSH) $(ROUTER) 'nft list table inet gotun 2>&1 | head -30' || true
 	@$(SSH) $(ROUTER) 'nft -t list set inet gotun ru_nets 2>/dev/null | grep -c . >/dev/null \
 		&& echo "  ru_nets elements: $$(nft list set inet gotun ru_nets 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+" | wc -l)"' || true
-	# Supervised services only. gotun-ipsec and fw3 are one-shot -- they do
-	# their work and exit -- so asking procd whether they are "running" reads
-	# as a fault when it is the normal state. Their effect is reported below
-	# instead, which is the thing that actually matters.
+# Supervised services only. gotun-ipsec and fw3 are one-shot -- they do their
+# work and exit -- so asking procd whether they are "running" reads as a fault
+# when it is the normal state. Their effect is reported separately, which is the
+# thing that actually matters.
 	$(call rsay,supervised services)
 	@$(SSH) $(ROUTER) 'for s in gotun gotun-dns singbox network; do \
 		printf "  %-12s " $$s; \
@@ -154,8 +154,8 @@ verify-router:
 	@$(SSH) $(ROUTER) 'ip -br link show | grep -E "xray|ipsec|wg|br-lan" || echo "  none"' || true
 	$(call rsay,hotplug hooks installed)
 	@$(SSH) $(ROUTER) 'ls -l /etc/hotplug.d/iface/*gotun* /etc/hotplug.d/net/*gotun* 2>&1 | sed "s/^/  /"' || true
-	# charon can be running, listening and completely empty. That is what a
-	# reboot used to leave behind, and it looks healthy from every other angle.
+# charon can be running, listening and completely empty. That is what a reboot
+# used to leave behind, and it looks healthy from every other angle.
 	$(call rsay,strongswan)
 	@$(SSH) $(ROUTER) 'pgrep charon >/dev/null && echo "  charon running" || echo "  charon NOT RUNNING"; \
 		n=$$(swanctl --list-conns 2>/dev/null | grep -cE "^[a-z0-9_-]+: +IKE"); \
