@@ -97,7 +97,7 @@ func TestOpenWrtArgv(t *testing.T) {
 			{"endpoint", "10.60.0.2"},
 			{"tunnel-iface", "xray0"},
 			{"lan", "10.60.0.0/24"},
-			{"mark-iface", "eth0"},
+			{"mark-iface", "eth0,ipsec0"},
 			{"clients-iface", "ipsec0"},
 			{"fail-mode", "open"},
 			{"ipv6", "off"},
@@ -272,11 +272,11 @@ func TestOpenWrtLifecycle(t *testing.T) {
 	t.Run("restart picks up an edited config", func(t *testing.T) {
 		was := o.servicePID(t, "gotun")
 		o.recordArgv(t)
-		o.writeConf(t, confWith("GOTUN_MARK_IFACE", "br-lan"))
+		o.writeConf(t, confWith("GOTUN_MARK_IFACE", "br-lan,ipsec0"))
 		o.sh(t, "/etc/init.d/gotun restart")
 		now := o.waitNewServicePID(t, "gotun", was)
-		if got, _ := flagValue(o.argv(t, "watch"), "mark-iface"); got != "br-lan" {
-			t.Errorf("-mark-iface = %q after restart, want br-lan: the restart did not re-read"+
+		if got, _ := flagValue(o.argv(t, "watch"), "mark-iface"); got != "br-lan,ipsec0" {
+			t.Errorf("-mark-iface = %q after restart, want br-lan,ipsec0: the restart did not re-read"+
 				" the config", got)
 		}
 		t.Logf("restarted %d -> %d", was, now)
@@ -405,3 +405,102 @@ exit 0
 }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// TestOpenWrtPolicy runs the real binary under procd against the real
+// nftables-nojson, and is the reason this lab exists at all.
+//
+// gotun reads its nft state back either as JSON or as text, depending on what
+// nft supports. Every other test in this package runs on Debian, where nft has
+// JSON -- so the text path, which is the one the router uses, has never run end
+// to end anywhere. A misparse there does not fail loudly: it makes gotun
+// believe the ruleset differs from what it wants and rebuild the whole thing on
+// every tick, forever. That is exactly the bug the two-interface ingress guard
+// had, and the second-apply scenario below is what would have caught it.
+func TestOpenWrtPolicy(t *testing.T) {
+	o := newOpenWrtNode(t, "pol")
+
+	// A dummy stands in for the sing-box tun. It is enough because the config
+	// pushes the probe interval out to an hour, so the watchdog never runs
+	// during the test and never needs the device to carry anything -- all that
+	// is being exercised here is the initial apply, which is what boot does.
+	o.sh(t, "ip link add xray0 type dummy && ip addr add 10.70.0.1/24 dev xray0 && ip link set xray0 up")
+	o.writeConf(t, owConf)
+	o.sh(t, "/etc/init.d/gotun enable && /etc/init.d/gotun start")
+	o.waitServicePID(t, "gotun")
+
+	t.Run("the policy is installed", func(t *testing.T) {
+		o.poll(t, "the ip rule at priority 100", 30*time.Second, func() (bool, string) {
+			out := o.sh(t, "ip rule show")
+			return strings.Contains(out, "100:"), out
+		})
+		if out := o.sh(t, "nft list table inet gotun"); !strings.Contains(out, "ru_nets") {
+			t.Errorf("the nft table is missing or has no prefix set:\n%s", out)
+		}
+		if out := o.sh(t, "ip route show table 100"); !strings.Contains(out, "xray0") {
+			t.Errorf("table 100 has no route via the tunnel device:\n%s", out)
+		}
+	})
+
+	// The one with the most value in the whole lab.
+	t.Run("a second apply changes nothing", func(t *testing.T) {
+		out := o.sh(t, "/usr/bin/gotun apply"+applyArgsFrom(owConf))
+		if !strings.Contains(out, "0 changes") {
+			t.Errorf("re-applying the same policy reports changes, so something read back from"+
+				" nft does not match what was written. On the router this means the ruleset is"+
+				" rebuilt on every tick, forever.\n%s", out)
+		}
+	})
+
+	t.Run("stop removes everything it installed", func(t *testing.T) {
+		o.sh(t, "/etc/init.d/gotun stop")
+		o.poll(t, "the policy to be withdrawn", 30*time.Second, func() (bool, string) {
+			rule := o.sh(t, "ip rule show")
+			return !strings.Contains(rule, "100:"), rule
+		})
+		if out := o.sh(t, "ip route show table 100"); strings.TrimSpace(out) != "" {
+			t.Errorf("table 100 still has routes after stop:\n%s", out)
+		}
+		if out, rc := o.shRC(t, "nft list table inet gotun 2>&1"); rc == 0 {
+			t.Errorf("the nft table survives stop:\n%s", out)
+		}
+	})
+
+	// gotun clear takes no flags and removes a hardcoded set of interfaces. On
+	// this deployment both happen to be absent, so it is a no-op -- but a box
+	// whose tunnel is named one of them would have `/etc/init.d/gotun stop`
+	// delete the live transport out from under its owner.
+	t.Run("stop does not delete a device gotun does not own", func(t *testing.T) {
+		o.sh(t, "ip link add wg-exit type dummy && ip link set wg-exit up")
+		t.Cleanup(func() { o.sh(t, "ip link del wg-exit 2>/dev/null") })
+
+		o.sh(t, "/etc/init.d/gotun start")
+		o.waitServicePID(t, "gotun")
+		o.sh(t, "/etc/init.d/gotun stop")
+
+		if _, rc := o.shRC(t, "ip link show wg-exit"); rc != 0 {
+			t.Error("`/etc/init.d/gotun stop` deleted wg-exit, a device gotun did not create." +
+				" On a box whose transport carries that name, stopping gotun takes the" +
+				" transport down with it.")
+		}
+	})
+}
+
+// applyArgsFrom turns a gotun.conf into the apply flags equivalent to what
+// gotun.init builds for watch, so the second-apply scenario compares like with
+// like. It is deliberately a separate, dumb translation: sharing code with the
+// init script is the thing being tested.
+func applyArgsFrom(conf string) string {
+	v := map[string]string{}
+	for _, l := range strings.Split(conf, "\n") {
+		k, val, ok := strings.Cut(l, "=")
+		if ok {
+			v[k] = val
+		}
+	}
+	return fmt.Sprintf(
+		" -prefixes %s -endpoint %s -tunnel-iface %s -lan %s -mark-iface %s"+
+			" -clients-iface %s -fail-mode %s -ipv6 %s -ipv6-fallback %s",
+		v["GOTUN_PREFIXES"], v["GOTUN_ENDPOINT"], v["GOTUN_TUNNEL_IFACE"], v["GOTUN_LAN"],
+		v["GOTUN_MARK_IFACE"], v["GOTUN_CLIENTS_IFACE"], v["GOTUN_FAIL_MODE"],
+		v["GOTUN_IPV6"], v["GOTUN_IPV6_FALLBACK"])
+}

@@ -325,11 +325,15 @@ func flagValue(argv []string, name string) (string, bool) {
 // watchdog that withdraws the route three minutes in because 1.1.1.1 is not
 // reachable from an internal bridge would flap a later assertion and get
 // blamed on something else.
+// GOTUN_CLIENTS_IFACE must also appear in GOTUN_MARK_IFACE -- gotun refuses
+// otherwise, because traffic arriving on a clients interface that is not marked
+// would never be classified at all. The live router has br-lan,ipsec0 for the
+// same reason.
 const owConf = `GOTUN_PREFIXES=/etc/gotun/prefixes.txt
 GOTUN_ENDPOINT=10.60.0.2
 GOTUN_TUNNEL_IFACE=xray0
 GOTUN_LAN=10.60.0.0/24
-GOTUN_MARK_IFACE=eth0
+GOTUN_MARK_IFACE=eth0,ipsec0
 GOTUN_CLIENTS_IFACE=ipsec0
 GOTUN_DIRECT_SRC=
 GOTUN_FAIL_MODE=open

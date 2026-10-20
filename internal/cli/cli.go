@@ -93,8 +93,19 @@ func truthy(s string) bool {
 
 func runClear(args []string) error {
 	fs := flag.NewFlagSet("clear", flag.ContinueOnError)
+	devices := fs.String("devices", "",
+		"interfaces to delete as well as withdrawing the policy (comma-separated)."+
+			" Name only devices gotun created: on OpenWrt the tunnel belongs to netifd or"+
+			" sing-box, and deleting it would take the transport down as a side effect of"+
+			" rolling back a routing policy. Empty, the default, touches no interface")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return Clear()
+	// Positional arguments would otherwise be accepted and ignored, so
+	// `gotun clear wg-exit` would look like it had done something.
+	if fs.NArg() > 0 {
+		return fmt.Errorf("clear takes no positional arguments, got %q;"+
+			" did you mean -devices %s", fs.Args(), fs.Arg(0))
+	}
+	return Clear(splitCSV(*devices)...)
 }

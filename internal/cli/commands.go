@@ -338,8 +338,11 @@ func probeTunnelIPv6(iface string) bool {
 }
 
 // Clear removes owned kernel objects.
-func Clear() error {
-	return apply.Clear(linux.ExecRunner{})
+// Clear withdraws the routing policy. It deletes an interface only when named
+// one, because gotun must not destroy a device it did not create -- see
+// apply.Clear.
+func Clear(devices ...string) error {
+	return apply.Clear(linux.ExecRunner{}, devices...)
 }
 
 func loadWGQuick(path string) (policy.WireGuardConfig, error) {

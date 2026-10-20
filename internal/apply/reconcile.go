@@ -94,11 +94,26 @@ func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 // steered into table 100, and tearing the tunnel down ahead of the rule would
 // black-hole marked traffic for the rest of the teardown under a fail-closed
 // policy -- the opposite of what a rollback is for.
-func Clear(r linux.Runner) error {
-	return errors.Join(
+func Clear(r linux.Runner, devices ...string) error {
+	errs := []error{
 		routing.Clear(r, policy.DefaultRulePriority, policy.DefaultTableID),
 		nftables.Clear(r, policy.OwnedNftFamily, policy.OwnedNftTable),
-		wireguard.Clear(r, policy.DefaultTunnelIface),
-		wireguard.Clear(r, policy.DefaultClientsIface),
-	)
+	}
+	// Only devices the caller names, and by default none.
+	//
+	// This used to delete policy.DefaultTunnelIface and
+	// policy.DefaultClientsIface unconditionally, which is wrong wherever gotun
+	// does not own the interface -- and on OpenWrt it never does: netifd or
+	// sing-box creates it and gotun holds no key for it by design. A box whose
+	// transport happened to carry one of those two names had its transport
+	// deleted by `/etc/init.d/gotun stop`, out from under its owner, as a side
+	// effect of withdrawing a routing policy. Measured in the deploy lab.
+	//
+	// Leaving a device behind is recoverable; destroying someone else's is not,
+	// so the default is the conservative one and a caller that really did
+	// create the device says so.
+	for _, d := range devices {
+		errs = append(errs, wireguard.Clear(r, d))
+	}
+	return errors.Join(errs...)
 }

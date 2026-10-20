@@ -63,7 +63,11 @@ Reconciler only touches objects it owns:
 - routing table **`100`** and ip rule priority **`100`**
 - WireGuard interface from policy (default `wg-exit`) when managed
 
-`gotun clear` deletes those owned objects only.
+`gotun clear` withdraws the policy -- the nft table, the ip rule and table 100 --
+and touches no interface unless told to. Pass `-devices wg-exit` to delete one as
+well, and name only a device gotun created: where netifd or sing-box owns the
+tunnel, as on OpenWrt, deleting it would take the transport down as a side effect
+of rolling back a routing policy.
 
 ## ICMP redirects
 

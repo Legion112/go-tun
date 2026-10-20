@@ -278,7 +278,7 @@ func TestClear_FailureIsReported(t *testing.T) {
 func TestClear_ContinuesPastAFailure(t *testing.T) {
 	r := linux.NewRecordingRunner()
 	r.FailOn = "nft delete table"
-	_ = apply.Clear(r)
+	_ = apply.Clear(r, "wg-exit")
 	joined := strings.Join(r.Calls, "\n")
 	for _, want := range []string{"rule del priority", "nft delete table", "ip link del dev wg-exit"} {
 		if !strings.Contains(joined, want) {
@@ -292,7 +292,7 @@ func TestClear_ContinuesPastAFailure(t *testing.T) {
 // of the teardown, which is the opposite of what a rollback is for.
 func TestClear_RemovesTheRuleBeforeTheTunnel(t *testing.T) {
 	r := linux.NewRecordingRunner()
-	if err := apply.Clear(r); err != nil {
+	if err := apply.Clear(r, "wg-exit"); err != nil {
 		t.Fatal(err)
 	}
 	rule, link := -1, -1
@@ -327,8 +327,35 @@ func TestClear_AbsentObjectsAreNotFailures(t *testing.T) {
 	for k, msg := range absent {
 		r.Errors[k] = errors.New(msg)
 	}
-	if err := apply.Clear(r); err != nil {
+	if err := apply.Clear(r, "wg-exit", "wg-clients"); err != nil {
 		t.Fatalf("clearing an already-clean box must succeed: %v", err)
+	}
+}
+
+// Clear must not delete an interface it was not told about.
+//
+// It used to delete policy.DefaultTunnelIface and policy.DefaultClientsIface
+// unconditionally, which on OpenWrt is always someone else's device: netifd or
+// sing-box creates the tunnel and gotun holds no key for it by design. A box
+// whose transport happened to be named wg-exit therefore lost its transport to
+// `/etc/init.d/gotun stop`, as a side effect of withdrawing a routing policy.
+func TestClear_LeavesUnnamedDevicesAlone(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	if err := apply.Clear(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.Calls {
+		if strings.Contains(c, "link del") {
+			t.Errorf("clear deleted an interface it was not asked to: %q\nall calls: %v",
+				c, r.Calls)
+		}
+	}
+	// It must still have withdrawn the policy, or it has simply stopped working.
+	joined := strings.Join(r.Calls, "\n")
+	for _, want := range []string{"rule del priority", "route flush table", "nft delete table"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("clear skipped %q:\n%s", want, joined)
+		}
 	}
 }
 
