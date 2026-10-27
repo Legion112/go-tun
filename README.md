@@ -500,6 +500,8 @@ Interfaces: exit hop default **`wg-exit`**; inbound clients **`wg-clients`**.
 
 GeoDNS lab: `TestDNSSplit_GeoEgressIdentity` under `make test-integration` (`labdns` answers by query source IP).
 
+**Ad blocking:** AdGuard Home can sit in front of gotun-dns, never behind it, and `gotun dnswatch` keeps dnsmasq's upstream list down to the hops that answer, so a dead blocker costs ad blocking and not DNS. Setup and failover measurements: [deploy/openwrt/README.md](deploy/openwrt/README.md#ad-blocking-with-adguard-home-without-betting-dns-on-it).
+
 ### Client cutover (`gotun-client`)
 
 Points a **client** host's default route at the gotun gateway and its DNS at the gateway-side resolver, keeping every on-link LAN reachable, and restores the previous settings on `disable`. NetworkManager only.

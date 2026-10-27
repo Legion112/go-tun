@@ -19,12 +19,12 @@ func main() {
 		"read settings from this /etc/gotun/gotun-dns.conf-style file. A flag passed"+
 			" explicitly wins over the file, and a setting the file omits keeps its default"+
 			" here rather than being overridden with an empty value")
-	listen := flag.String("listen", "127.0.0.2:53",
+	listen := flag.String("listen", dnsproxy.DefaultListen,
 		"UDP/TCP listen address. Not :53, because this resolver is never the only one on a"+
 			" box: it answers the subset of names that must be resolved through the tunnel,"+
 			" and something else -- dnsmasq, here -- has to forward to it. Binding the"+
 			" wildcard would fight whatever owns :53 and serves DHCP")
-	directUp := flag.String("direct-upstream", "77.88.8.8:53", "upstream for Direct path (.ru); unmarked dial")
+	directUp := flag.String("direct-upstream", dnsproxy.DefaultDirectUpstream, "upstream for Direct path (.ru); unmarked dial")
 	exitUp := flag.String("exit-upstream", "1.1.1.1:53", "upstream for Exit path; dialed with SO_MARK")
 	markStr := flag.String("mark", fmt.Sprintf("0x%x", policy.DefaultMark), "SO_MARK for Exit path (must match gotun apply)")
 	timeout := flag.Duration("timeout", 3*time.Second, "upstream query timeout")

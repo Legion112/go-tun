@@ -238,6 +238,108 @@ Marked DNS is UDP, and it does traverse VLESS -- sing-box logs
 `outbound packet connection to 1.1.1.1:53` -- so the split survives the move to a
 proxy transport.
 
+### Ad blocking with AdGuard Home, without betting DNS on it
+
+GL.iNet firmware ships AdGuard Home (`/usr/bin/AdGuardHome`, disabled by
+default). It goes **in front of** gotun-dns, never behind it:
+
+```
+client -> dnsmasq :53 -> AdGuard Home 127.0.0.1:3053 -> gotun-dns 127.0.0.2:53 -> Direct / Exit
+                      \-> gotun-dns -> 77.88.8.8   (what dnsmasq falls back to, in order)
+```
+
+Behind it, or left on its own upstreams, AdGuard Home resolves foreign names
+itself, unmarked, over the ISP -- exactly the interfered answers gotun-dns exists
+to avoid. Its only upstream is gotun-dns.
+
+Blocking is the part allowed to fail. Two things stand in the way of that, and
+both are why this is wired by hand rather than through the GL.iNet UI:
+
+- The UI's AdGuard toggle replaces dnsmasq's `server` list with
+  `127.0.0.1#3053`, dropping gotun-dns and the fallback.
+- Its "AdGuard Home handle client requests" mode redirects clients' port 53
+  straight to AdGuard Home in nft (`/etc/firewall.dns_order`), so dnsmasq is not
+  in the path at all and a dead AdGuard Home is a dead LAN.
+
+And dnsmasq's own failover is too slow to rely on. It moves down its list only
+when a client retries: measured here with `strict-order`, every uncached lookup
+stalled about 2 s for as long as AdGuard Home was hung or stopped (a glibc client
+waits its full 5 s), and without `strict-order` a hung AdGuard Home failed
+lookups outright after 6 s. The pre-existing gotun-dns → 77.88.8.8 fallback had
+the same 2 s stall. So `gotun dnswatch` probes each hop every 2 s and rewrites
+dnsmasq's list to the ones that answer:
+
+| AdGuard Home | gotun-dns | dnsmasq tries |
+|---|---|---|
+| up | up | AdGuard Home, gotun-dns, 77.88.8.8 |
+| down | up | gotun-dns, 77.88.8.8 -- unfiltered, still split |
+| either | down | 77.88.8.8 -- AdGuard's only upstream is gotun-dns, so it goes too |
+
+gotun-dns counts as up only if it answers both a `.ru` canary and a foreign one,
+so a tunnel that stops carrying DNS falls back to the local resolver instead of
+timing out every foreign lookup. 77.88.8.8 is never removed. On stop the watcher
+writes the full list back -- slower to fail over, never missing a hop.
+
+AdGuard Home, configured from the shell:
+
+```sh
+C=/etc/AdGuardHome/config.yaml
+# Loopback only: the web UI has no password, and the DNS port is for dnsmasq alone.
+sed -i -e 's/^bind_host: 0.0.0.0/bind_host: 127.0.0.1/' \
+  -e '/^  bind_hosts:/{n;s/- 0.0.0.0/- 127.0.0.1/}' $C
+# Everything arrives from dnsmasq, i.e. from one client: the default limit of 20 q/s
+# per client would throttle the whole LAN.
+sed -i -e 's/^  ratelimit: 20/  ratelimit: 0/' \
+  -e 's/^  upstream_timeout: 10s/  upstream_timeout: 2s/' \
+  -e 's/^  use_private_ptr_resolvers: true/  use_private_ptr_resolvers: false/' \
+  -e 's/^  cache_optimistic: false/  cache_optimistic: true/' $C
+sed -i -e '/^  upstream_dns:/,/^  upstream_dns_file/c\  upstream_dns:\n  - 127.0.0.2:53\n  upstream_dns_file: ""' $C
+uci set adguardhome.config.enabled=1 && uci commit adguardhome   # not dns_enabled
+/etc/init.d/adguardhome start
+# It migrates the config on first start; then add the fallback for gotun-dns being down.
+sed -i 's/^  fallback_dns: \[\]/  fallback_dns:\n    - 77.88.8.8:53/' $C
+/etc/init.d/adguardhome restart
+```
+
+The ratelimit line is not optional. `use_private_ptr_resolvers` off stops
+AdGuard Home sending LAN reverse lookups back to dnsmasq, which forwards them to
+AdGuard Home. Its web UI is then reachable through
+`ssh -L 3000:127.0.0.1:3000 root@router` at `http://localhost:3000`; leave the
+upstream there as it is.
+
+Then the watcher, and dnsmasq switched from its `server` list to the file the
+watcher owns. Set `GOTUN_DNS_FILTER=127.0.0.1:3053` in
+`/etc/gotun/gotun-dns.conf` first (see `gotun-dns.conf.example`); gotun-dns
+must be a build that knows the key, or it refuses the file.
+
+```sh
+scp deploy/openwrt/gotun-dnswatch.init root@router:/etc/init.d/gotun-dnswatch
+ssh root@router 'chmod +x /etc/init.d/gotun-dnswatch'
+ssh root@router "printf '/etc/init.d/gotun-dnswatch\n/etc/AdGuardHome/config.yaml\n' >> /etc/sysupgrade.conf"
+ssh root@router '
+  printf "server=127.0.0.1#3053\nserver=127.0.0.2\nserver=77.88.8.8\n" > /etc/gotun/dnsmasq.servers
+  uci -q delete dhcp.@dnsmasq[0].server
+  uci set dhcp.@dnsmasq[0].serversfile=/etc/gotun/dnsmasq.servers
+  uci set dhcp.@dnsmasq[0].strictorder=1
+  uci commit dhcp && /etc/init.d/dnsmasq restart
+  /etc/init.d/gotun-dnswatch enable && /etc/init.d/gotun-dnswatch start'
+```
+
+dnsmasq starts long before the watcher, so the file is created by hand once and
+lives in `/etc/gotun/`; after that the watcher rewrites it in place, only on a
+change, and SIGHUPs dnsmasq, which re-reads a servers file without restarting.
+
+Measured on the live router, a fresh name looked up once a second through
+`192.168.8.1`, each failure held for 25 s: no lookup failed. Stalls before the
+watcher removed the hop: AdGuard Home hung (SIGSTOP), 2 lookups at about 2 s;
+AdGuard Home stopped, 1 at 2 s; gotun-dns hung, 1 at 4 s. Each hop was back in
+the list within about 6 s of recovering. `logread | grep dnswatch` shows every
+transition.
+
+To take it out: `/etc/init.d/gotun-dnswatch disable && /etc/init.d/gotun-dnswatch stop`,
+then `uci delete dhcp.@dnsmasq[0].serversfile` and restore the `server` list
+above. Turning AdGuard Home off alone is safe: the watcher drops it.
+
 ## Exposing a host: a port forward is not enough
 
 A forwarded port gets packets *in*. Getting them back out needs

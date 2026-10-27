@@ -13,7 +13,7 @@ import (
 // Run dispatches gotun subcommands.
 func Run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gotun <fetch|amnezia|ikev2|ipsec|apply|check|watch|hotplug|clear|version>")
+		return fmt.Errorf("usage: gotun <fetch|amnezia|ikev2|ipsec|apply|check|watch|dnswatch|hotplug|clear|version>")
 	}
 	switch args[0] {
 	case "version", "-version", "--version":
@@ -33,6 +33,8 @@ func Run(args []string) error {
 		return runCheck(args[1:])
 	case "watch":
 		return runWatch(args[1:])
+	case "dnswatch":
+		return runDNSWatch(args[1:])
 	case "hotplug":
 		return runHotplug(args[1:])
 	case "clear":

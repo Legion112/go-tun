@@ -90,6 +90,17 @@ var DNSFlags = Mapping{
 	"GOTUN_DNS_MARK":   "mark",
 }
 
+// DNSWatchFlags is what `gotun dnswatch` reads, out of the same file as
+// gotun-dns. The resolver it watches is gotun-dns's listen address and its last
+// resort is gotun-dns's own direct upstream: one variable each, so the watcher
+// cannot end up probing a resolver other than the one that is running.
+var DNSWatchFlags = Mapping{
+	"GOTUN_DNS_LISTEN":       "resolver",
+	"GOTUN_DNS_DIRECT":       "fallback",
+	"GOTUN_DNS_FILTER":       "filter",
+	"GOTUN_DNS_SERVERS_FILE": "servers-file",
+}
+
 // Schema is one configuration file: the mappings that read it, and so the set
 // of variables it may contain.
 type Schema struct {
@@ -108,7 +119,7 @@ var (
 	}
 	GotunDNSConf = Schema{
 		File:     "/etc/gotun/gotun-dns.conf",
-		Mappings: []Mapping{DNSFlags},
+		Mappings: []Mapping{DNSFlags, DNSWatchFlags},
 	}
 )
 
@@ -119,10 +130,16 @@ const DefaultPidFile = "/var/run/gotun.pid"
 
 // Keys is every variable the file may contain, sorted.
 func (s Schema) Keys() []string {
+	// A variable can be read by more than one command -- GOTUN_DNS_LISTEN is
+	// where gotun-dns listens and what dnswatch probes -- so the set, not the sum.
+	seen := map[string]bool{}
 	var out []string
 	for _, m := range s.Mappings {
 		for k := range m {
-			out = append(out, k)
+			if !seen[k] {
+				seen[k] = true
+				out = append(out, k)
+			}
 		}
 	}
 	sort.Strings(out)

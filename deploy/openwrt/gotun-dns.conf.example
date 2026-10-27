@@ -35,3 +35,28 @@ GOTUN_DNS_EXIT=1.1.1.1:53
 # the ones table 100 picks up and DNS quietly stops being tunnelled. Both sides
 # default to this value; change neither alone.
 GOTUN_DNS_MARK=0x1
+
+# --- read by gotun dnswatch (/etc/init.d/gotun-dnswatch) --------------------
+#
+# The watcher reads GOTUN_DNS_LISTEN above as the resolver to probe and
+# GOTUN_DNS_DIRECT as the last resort, which it never removes. The two below are
+# its own.
+
+# A blocking resolver in front of gotun-dns -- AdGuard Home at 127.0.0.1:3053,
+# with gotun-dns as its only upstream. It is dnsmasq's first server while it
+# answers and is dropped while it does not, so a dead blocker costs ad blocking
+# and nothing else. Empty, the default, means there is no blocker and the list
+# is gotun-dns then GOTUN_DNS_DIRECT, as before.
+#
+#   GOTUN_DNS_FILTER=127.0.0.1:3053
+GOTUN_DNS_FILTER=
+
+# The list the watcher writes, as server= lines, and dnsmasq reads:
+#
+#   uci -q delete dhcp.@dnsmasq[0].server
+#   uci set dhcp.@dnsmasq[0].serversfile=/etc/gotun/dnsmasq.servers
+#
+# Under /etc/gotun so that it survives a reboot -- dnsmasq starts long before
+# the watcher and must find a working list waiting -- and written only when it
+# changes.
+GOTUN_DNS_SERVERS_FILE=/etc/gotun/dnsmasq.servers

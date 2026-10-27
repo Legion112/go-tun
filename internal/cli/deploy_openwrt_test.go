@@ -369,7 +369,8 @@ func TestConfigIsSourcedBeforeItsVariablesAreRead(t *testing.T) {
 // that does not exist: procd skips it and the boot carries on quietly.
 func TestInitScriptsAreExecutable(t *testing.T) {
 	for _, name := range []string{
-		"gotun.init", "gotun-dns.init", "gotun-ipsec.init", "singbox.init", "hotplug-iface-gotun",
+		"gotun.init", "gotun-dns.init", "gotun-dnswatch.init", "gotun-ipsec.init", "singbox.init",
+		"hotplug-iface-gotun",
 	} {
 		// -C: git resolves pathspecs against the working directory, which for a
 		// test is the package directory, not the repository root.
@@ -393,7 +394,7 @@ func TestInitScriptsAreExecutable(t *testing.T) {
 
 func TestStartStopOrdering(t *testing.T) {
 	type svc struct{ file string }
-	order := []string{"gotun-ipsec.init", "gotun-dns.init", "singbox.init", "gotun.init"}
+	order := []string{"gotun-ipsec.init", "gotun-dns.init", "gotun-dnswatch.init", "singbox.init", "gotun.init"}
 	starts := map[string]int{}
 	stops := map[string]int{}
 	for _, f := range order {
@@ -513,7 +514,7 @@ func TestGotunDNSMarkIsDerivedFromPolicy(t *testing.T) {
 func TestEveryInitScriptHasAnInstallStep(t *testing.T) {
 	readme := readDeploy(t, "README.md")
 	for _, name := range []string{
-		"gotun.init", "gotun-dns.init", "gotun-ipsec.init", "singbox.init",
+		"gotun.init", "gotun-dns.init", "gotun-dnswatch.init", "gotun-ipsec.init", "singbox.init",
 		"hotplug-iface-gotun",
 	} {
 		if !strings.Contains(readme, "deploy/openwrt/"+name) {
@@ -620,12 +621,31 @@ func TestSchemaFlagsResolve(t *testing.T) {
 		{"gotun apply", apply, deployconf.ApplyFlags},
 		{"gotun watch", watchFlagSet(), deployconf.WatchFlags},
 		{"gotun ipsec", ipsecFlagSet(), deployconf.IPsecFlags},
+		{"gotun dnswatch", dnsWatchFlagSet(), deployconf.DNSWatchFlags},
 	} {
 		for key, name := range c.m {
 			if lookup(c.fs, name) == nil {
 				t.Errorf("deployconf maps %s to -%s, which `%s` does not define",
 					key, name, c.command)
 			}
+		}
+	}
+}
+
+func dnsWatchFlagSet() *flag.FlagSet {
+	fs := flag.NewFlagSet("dnswatch", flag.ContinueOnError)
+	registerDNSWatchFlags(fs)
+	return fs
+}
+
+// The init passes flags to `gotun dnswatch`, not to gotun-dns, although it reads
+// gotun-dns's file.
+func TestGotunDNSWatchInitFlagsExist(t *testing.T) {
+	fs := dnsWatchFlagSet()
+	for _, f := range parseFlags(readDeploy(t, "gotun-dnswatch.init")) {
+		if lookup(fs, f.name) == nil {
+			t.Errorf("gotun-dnswatch.init:%d passes -%s, which `gotun dnswatch` does not define",
+				f.line, f.name)
 		}
 	}
 }
