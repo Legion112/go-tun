@@ -1,0 +1,43 @@
+name: Pages
+
+on:
+  push:
+    branches: [master]
+    # The landing page is the only thing published, so a Go change has no
+    # reason to redeploy it.
+    paths:
+      - site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy halfway: a half-published site is worse than one
+# that is a commit behind.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: publish site/
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/configure-pages@v5
+
+      # site/ is plain HTML with nothing to build, so it is uploaded as is and
+      # Jekyll never runs over it.
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

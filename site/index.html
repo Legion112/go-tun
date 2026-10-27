@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="ru" data-lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gotun — российское напрямую, остальное через туннель</title>
+<meta name="description" content="gotun — шлюз раздельного туннелирования для дома: российские адреса идут через провайдера, всё остальное — через ваш WireGuard-сервер. Linux и OpenWrt.">
+<meta property="og:title" content="gotun — split-tunnel gateway">
+<meta property="og:description" content="Russian destinations go direct. Everything else rides your own WireGuard tunnel. Self-hosted, Linux & OpenWrt.">
+<meta property="og:type" content="website">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0f14'/%3E%3Cpath d='M6 16h8' stroke='%23e6edf3' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M14 16c4 0 4-7 12-7' stroke='%23f5a524' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 16c4 0 4 7 12 7' stroke='%232dd4bf' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f7f9;
+  --bg-2: #eef1f5;
+  --surface: #ffffff;
+  --line: #e1e6ed;
+  --text: #0e1621;
+  --muted: #586a80;
+  --direct: #c27400;
+  --direct-soft: rgba(194, 116, 0, 0.12);
+  --tunnel: #0b8f84;
+  --tunnel-soft: rgba(11, 143, 132, 0.12);
+  --accent: #3b5bdb;
+  --code-bg: #0e1621;
+  --code-text: #e6edf3;
+  --code-muted: #7f90a6;
+  --shadow: 0 1px 2px rgba(14, 22, 33, 0.04), 0 8px 24px rgba(14, 22, 33, 0.06);
+  --grid: rgba(14, 22, 33, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a0e13;
+    --bg-2: #0f141b;
+    --surface: #121922;
+    --line: #1f2a37;
+    --text: #e6edf3;
+    --muted: #8b9bb0;
+    --direct: #f5a524;
+    --direct-soft: rgba(245, 165, 36, 0.12);
+    --tunnel: #2dd4bf;
+    --tunnel-soft: rgba(45, 212, 191, 0.12);
+    --accent: #7c9cff;
+    --code-bg: #070a0e;
+    --code-text: #e6edf3;
+    --code-muted: #6b7c92;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+    --grid: rgba(230, 237, 243, 0.04);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0e13;
+  --bg-2: #0f141b;
+  --surface: #121922;
+  --line: #1f2a37;
+  --text: #e6edf3;
+  --muted: #8b9bb0;
+  --direct: #f5a524;
+  --direct-soft: rgba(245, 165, 36, 0.12);
+  --tunnel: #2dd4bf;
+  --tunnel-soft: rgba(45, 212, 191, 0.12);
+  --accent: #7c9cff;
+  --code-bg: #070a0e;
+  --code-text: #e6edf3;
+  --code-muted: #6b7c92;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35);
+  --grid: rgba(230, 237, 243, 0.04);
+}
+
+/* Only the chosen language is shown. Markup carries both, Russian first, so
+   the page reads correctly with scripts off. */
+html[data-lang="ru"] [lang="en"],
+html[data-lang="en"] [lang="ru"] { display: none !important; }
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 17px/1.6 "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+a { color: inherit; }
+code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+:not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.1em 0.38em;
+  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+.wrap { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+@media (min-width: 720px) { .wrap { padding: 0 32px; } }
+
+/* Header */
+.top {
+  position: sticky; top: 0; z-index: 10;
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+.top .wrap { display: flex; align-items: center; gap: 16px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -0.02em; text-decoration: none; font-size: 19px; }
+.brand svg { width: 28px; height: 28px; }
+.nav { display: none; gap: 22px; margin-left: 24px; font-size: 15px; color: var(--muted); }
+.nav a { text-decoration: none; }
+.nav a:hover { color: var(--text); }
+@media (min-width: 860px) { .nav { display: flex; } }
+.top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--surface); }
+.seg button {
+  font: 600 13px/1 "Manrope", sans-serif; color: var(--muted);
+  border: 0; background: transparent; padding: 7px 11px; border-radius: 999px; cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.gh-link {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+  font-size: 14px; font-weight: 600; padding: 8px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface);
+}
+.gh-link svg { width: 17px; height: 17px; }
+.gh-link .label { display: none; }
+@media (min-width: 520px) { .gh-link .label { display: inline; } }
+
+/* Hero */
+.hero {
+  position: relative;
+  padding: 72px 0 40px;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 44px 44px;
+  background-position: center top;
+}
+.hero::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(60% 50% at 50% 0%, transparent 0%, var(--bg) 100%);
+}
+.hero > .wrap { position: relative; z-index: 1; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  border: 1px solid var(--line); background: var(--surface);
+  padding: 6px 12px 6px 8px; border-radius: 999px;
+}
+.eyebrow .dot { display: inline-flex; gap: 3px; }
+.eyebrow .dot i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+.eyebrow .dot i:first-child { background: var(--direct); }
+.eyebrow .dot i:last-child { background: var(--tunnel); }
+h1 {
+  margin: 22px 0 18px;
+  font-size: clamp(34px, 6.4vw, 66px);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  font-weight: 800;
+  max-width: 18ch;
+}
+h1 .d { color: var(--direct); }
+h1 .t { color: var(--tunnel); }
+.lead { font-size: clamp(17px, 2.1vw, 20px); color: var(--muted); max-width: 62ch; margin: 0 0 30px; }
+.lead b { color: var(--text); font-weight: 600; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-weight: 700; font-size: 16px; text-decoration: none;
+  padding: 13px 20px; border-radius: 12px; border: 1px solid transparent;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.btn:hover { transform: translateY(-1px); }
+.btn-primary { background: var(--text); color: var(--bg); box-shadow: var(--shadow); }
+.btn-ghost { border-color: var(--line); background: var(--surface); }
+.btn svg { width: 18px; height: 18px; }
+.fine { margin-top: 18px; font-size: 14px; color: var(--muted); }
+
+/* Diagram */
+.diagram {
+  margin-top: 52px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 20px;
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+.diagram svg { display: block; width: 100%; height: auto; }
+.diagram .wide { display: none; }
+@media (min-width: 720px) {
+  .diagram { padding: 26px 30px; }
+  .diagram .wide { display: block; }
+  .diagram .tall { display: none; }
+}
+.dg-node { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.dg-gw { fill: var(--bg-2); stroke: var(--text); stroke-width: 1.8; }
+.dg-ru { fill: var(--direct-soft); stroke: var(--direct); stroke-width: 1.5; }
+.dg-ex { fill: var(--tunnel-soft); stroke: var(--tunnel); stroke-width: 1.5; }
+.dg-title { fill: var(--text); font: 700 17px "Manrope", sans-serif; }
+.dg-sub { fill: var(--muted); font: 500 13px "Manrope", sans-serif; }
+.dg-mono { fill: var(--text); font: 600 18px "JetBrains Mono", monospace; }
+.dg-line { fill: none; stroke: var(--line); stroke-width: 2; }
+.dg-direct { fill: none; stroke: var(--direct); stroke-width: 2.2; }
+.dg-tunnel { fill: none; stroke: var(--tunnel); stroke-width: 2.2; stroke-dasharray: 7 6; }
+.dg-tube { fill: none; stroke: var(--tunnel-soft); stroke-width: 14; stroke-linecap: round; }
+.pkt-d { fill: var(--direct); }
+.pkt-t { fill: var(--tunnel); }
+@media (prefers-reduced-motion: reduce) { .pkt-d, .pkt-t { display: none; } }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 14px 2px 2px; font-size: 14px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend i { width: 22px; height: 0; border-top: 2.5px solid; display: inline-block; }
+.legend .ld i { border-color: var(--direct); }
+.legend .lt i { border-color: var(--tunnel); border-top-style: dashed; }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; margin: 56px 0 0; }
+@media (min-width: 860px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+.stat { background: var(--surface); padding: 22px 20px; }
+.stat b { display: block; font-size: clamp(24px, 3.4vw, 32px); letter-spacing: -0.03em; font-weight: 800; margin-bottom: 4px; }
+.stat span { font-size: 14px; color: var(--muted); line-height: 1.45; display: block; }
+
+/* Sections */
+section { padding: 88px 0 0; }
+.kicker { font: 600 13px "JetBrains Mono", monospace; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+h2 { font-size: clamp(28px, 4.2vw, 42px); line-height: 1.12; letter-spacing: -0.03em; margin: 0 0 16px; font-weight: 800; max-width: 22ch; }
+.sec-lead { color: var(--muted); max-width: 64ch; margin: 0 0 36px; font-size: 18px; }
+
+.why { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 860px) { .why { grid-template-columns: repeat(3, 1fr); } }
+.why-card { border-radius: 18px; padding: 26px; border: 1px solid var(--line); background: var(--surface); }
+.why-card .tag { display: inline-block; font: 600 12px "JetBrains Mono", monospace; padding: 4px 9px; border-radius: 999px; margin-bottom: 14px; }
+.why-card.d .tag { color: var(--direct); background: var(--direct-soft); }
+.why-card.t .tag { color: var(--tunnel); background: var(--tunnel-soft); }
+.why-card.n .tag { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.why-card h3 { margin: 0 0 8px; font-size: 20px; letter-spacing: -0.015em; }
+.why-card p { margin: 0; color: var(--muted); font-size: 16px; }
+
+.features { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; grid-template-columns: 1fr; }
+@media (min-width: 640px) { .features { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .features { grid-template-columns: repeat(4, 1fr); } }
+.feat { background: var(--surface); padding: 26px 24px 28px; }
+.feat .ic { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; background: var(--bg-2); border: 1px solid var(--line); margin-bottom: 16px; }
+.feat .ic svg { width: 21px; height: 21px; stroke: var(--text); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.feat h3 { margin: 0 0 7px; font-size: 17px; letter-spacing: -0.01em; }
+.feat p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55; }
+.also { margin: 18px 2px 0; color: var(--muted); font-size: 15px; }
+
+/* Tested */
+.tested { display: grid; gap: 24px; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 940px) { .tested { grid-template-columns: 1fr 1.1fr; gap: 40px; } }
+.checks { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 12px; }
+.checks li { display: flex; gap: 12px; color: var(--muted); font-size: 16px; }
+.checks li::before {
+  content: "✓"; flex: none; width: 22px; height: 22px; margin-top: 2px; border-radius: 7px;
+  display: grid; place-items: center; font-size: 13px; font-weight: 800; line-height: 1;
+  color: var(--tunnel); background: var(--tunnel-soft);
+}
+.checks li b { color: var(--text); font-weight: 600; }
+.field {
+  border-radius: 16px; padding: 20px 22px; border: 1px solid var(--direct);
+  background: var(--direct-soft); font-size: 15.5px;
+}
+.field .kicker { color: var(--direct); margin-bottom: 6px; }
+.field p { margin: 0; }
+.term {
+  border-radius: 18px; background: var(--code-bg); color: var(--code-text);
+  border: 1px solid var(--line); box-shadow: var(--shadow); overflow: hidden;
+}
+.term-bar { display: flex; align-items: center; gap: 7px; padding: 12px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+.term-bar i { width: 11px; height: 11px; border-radius: 50%; background: #2a3442; display: block; }
+.term-bar span { margin-left: 10px; font: 500 12.5px "JetBrains Mono", monospace; color: var(--code-muted); }
+.term-body { padding: 16px 18px 20px; font: 400 13.5px/1.75 "JetBrains Mono", monospace; overflow-x: auto; }
+.term-row { display: grid; grid-template-columns: 1fr; gap: 0 18px; padding: 5px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.06); }
+.term-row:last-child { border-bottom: 0; }
+@media (min-width: 560px) { .term-row { grid-template-columns: 210px 1fr; } }
+/* The terminal is dark in both themes, so it keeps the dark-theme teal. */
+.term-row .f { color: #2dd4bf; }
+.term-row .d { color: var(--code-muted); font-family: "Manrope", sans-serif; font-size: 14px; }
+
+/* Steps */
+.steps { display: grid; gap: 16px; grid-template-columns: 1fr; counter-reset: s; margin-bottom: 40px; }
+@media (min-width: 860px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+.step { position: relative; padding: 24px 24px 26px; border-radius: 18px; border: 1px solid var(--line); background: var(--surface); }
+.step::before {
+  counter-increment: s; content: counter(s);
+  display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  font: 700 15px "JetBrains Mono", monospace; background: var(--text); color: var(--bg); margin-bottom: 16px;
+}
+.step h3 { margin: 0 0 6px; font-size: 18px; }
+.step p { margin: 0; color: var(--muted); font-size: 15.5px; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.tabs button {
+  font: 600 14px "Manrope", sans-serif; color: var(--muted); cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); padding: 9px 14px; border-radius: 10px;
+}
+.tabs button[aria-selected="true"] { color: var(--bg); background: var(--text); border-color: var(--text); }
+.code { position: relative; border-radius: 16px; background: var(--code-bg); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.code pre { margin: 0; padding: 22px 20px; overflow-x: auto; color: var(--code-text); font-size: 13.5px; line-height: 1.75; }
+.code .c { color: var(--code-muted); }
+.code .p { color: #2dd4bf; user-select: none; }
+.copy {
+  position: absolute; top: 10px; right: 10px;
+  font: 600 12px "Manrope", sans-serif; color: var(--code-muted);
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 10px; border-radius: 8px; cursor: pointer;
+}
+.copy:hover { color: var(--code-text); }
+.panel[hidden] { display: none; }
+.panel-note { color: var(--muted); font-size: 15px; margin: 14px 2px 0; }
+
+.req { margin-top: 28px; display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 720px) { .req { grid-template-columns: repeat(4, 1fr); } }
+.req div { border: 1px dashed var(--line); border-radius: 14px; padding: 16px 18px; font-size: 15px; color: var(--muted); }
+.req b { display: block; color: var(--text); margin-bottom: 2px; font-size: 15.5px; }
+
+/* FAQ */
+.faq { display: grid; gap: 10px; max-width: 820px; }
+.faq details { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; padding: 0 20px; }
+.faq summary {
+  cursor: pointer; list-style: none; padding: 18px 0; font-weight: 700; font-size: 17px;
+  display: flex; justify-content: space-between; align-items: center; gap: 16px;
+}
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; font: 400 22px "JetBrains Mono", monospace; color: var(--muted); transition: transform 0.2s; }
+.faq details[open] summary::after { transform: rotate(45deg); }
+.faq details p { margin: 0 0 18px; color: var(--muted); font-size: 16px; }
+
+/* Closing */
+.closing {
+  margin: 96px 0 0; padding: 48px 28px; border-radius: 24px; text-align: center;
+  background:
+    radial-gradient(80% 120% at 0% 0%, var(--direct-soft), transparent 60%),
+    radial-gradient(80% 120% at 100% 100%, var(--tunnel-soft), transparent 60%),
+    var(--surface);
+  border: 1px solid var(--line);
+}
+.closing h2 { margin: 0 auto 12px; }
+.closing p { color: var(--muted); margin: 0 auto 26px; max-width: 52ch; }
+.closing .ctas { justify-content: center; }
+
+footer { padding: 48px 0 56px; color: var(--muted); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 24px; }
+footer nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+footer a { text-decoration: none; }
+footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor" opacity="0.08"/><path d="M6 16h8" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M14 16c4 0 4-7 12-7" stroke="var(--direct)" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M14 16c4 0 4 7 12 7" stroke="var(--tunnel)" stroke-width="3" fill="none" stroke-linecap="round"/></svg>
+      gotun
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#why"><span lang="ru">Зачем</span><span lang="en">Why</span></a>
+      <a href="#features"><span lang="ru">Возможности</span><span lang="en">Features</span></a>
+      <a href="#tested"><span lang="ru">Тесты</span><span lang="en">Testing</span></a>
+      <a href="#start"><span lang="ru">Установка</span><span lang="en">Install</span></a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="top-right">
+      <div class="seg" role="group" aria-label="Language">
+        <button type="button" data-set-lang="ru" aria-pressed="true">RU</button>
+        <button type="button" data-set-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="gh-link" href="https://github.com/Legion112/go-tun">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="label">GitHub</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <span class="eyebrow">
+        <span class="dot"><i></i><i></i></span>
+        <span lang="ru">Шлюз раздельного туннелирования · Linux и OpenWrt</span>
+        <span lang="en">Self-hosted split-tunnel gateway · Linux &amp; OpenWrt</span>
+      </span>
+
+      <h1 lang="ru"><span class="d">Российское —</span> напрямую. <span class="t">Остальное —</span> через ваш туннель.</h1>
+      <h1 lang="en"><span class="d">Russian traffic</span> goes direct. <span class="t">Everything else</span> rides your tunnel.</h1>
+
+      <p class="lead" lang="ru">gotun работает на роутере или Raspberry Pi и решает за каждое устройство в доме: <b>адреса в России идут через вашего провайдера</b>, <b>всё остальное — через ваш WireGuard-сервер за рубежом</b>. Ноутбукам, телевизорам и телефонам не нужны ни приложения, ни правила.</p>
+      <p class="lead" lang="en">gotun runs on your router or a Raspberry Pi and makes the call for every device in the house: <b>Russian addresses leave through your ISP</b>, <b>everything else through your own WireGuard server abroad</b>. Laptops, TVs and phones need no apps and no rules.</p>
+
+      <div class="ctas">
+        <a class="btn btn-primary" href="#start">
+          <span lang="ru">Начать</span><span lang="en">Get started</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/Legion112/go-tun">
+          <span lang="ru">Код на GitHub</span><span lang="en">View on GitHub</span>
+        </a>
+      </div>
+      <p class="fine" lang="ru">Бесплатно. На вашем железе. Ваш выходной сервер — ваши правила.</p>
+      <p class="fine" lang="en">Free. On your own hardware. Your exit server, your rules.</p>
+
+      <figure class="diagram" aria-label="How gotun routes traffic">
+        <!-- Wide layout: devices → gotun → two exits. Packets are drawn before
+             the nodes so they pass behind the gateway box. -->
+        <svg class="wide" viewBox="0 0 820 300" role="img">
+          <path class="dg-line" d="M210 150 H330"/>
+          <path class="dg-direct" d="M470 140 C 535 140, 535 70, 600 70"/>
+          <path class="dg-tube" d="M470 160 C 535 160, 535 230, 600 230"/>
+          <path class="dg-tunnel" d="M470 160 C 535 160, 535 230, 600 230"/>
+
+          <path id="rA" d="M210 142 H470 C 535 142, 535 70, 600 70" fill="none"/>
+          <path id="rB" d="M210 158 H470 C 535 158, 535 230, 600 230" fill="none"/>
+          <circle class="pkt-d" r="5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="0s"><mpath href="#rA"/></animateMotion></circle>
+          <circle class="pkt-d" r="5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-1.6s"><mpath href="#rA"/></animateMotion></circle>
+          <circle class="pkt-t" r="5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-0.8s"><mpath href="#rB"/></animateMotion></circle>
+          <circle class="pkt-t" r="5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-2.4s"><mpath href="#rB"/></animateMotion></circle>
+
+          <rect class="dg-node" x="20" y="95" width="190" height="110" rx="16"/>
+          <text class="dg-title" x="115" y="140" text-anchor="middle" lang="ru">Ваши устройства</text>
+          <text class="dg-title" x="115" y="140" text-anchor="middle" lang="en">Your devices</text>
+          <text class="dg-sub" x="115" y="164" text-anchor="middle" lang="ru">ноутбук · ТВ · телефон</text>
+          <text class="dg-sub" x="115" y="164" text-anchor="middle" lang="en">laptop · TV · phone</text>
+
+          <rect class="dg-gw" x="330" y="100" width="140" height="100" rx="16"/>
+          <text class="dg-mono" x="400" y="145" text-anchor="middle">gotun</text>
+          <text class="dg-sub" x="400" y="169" text-anchor="middle" lang="ru">RU или нет?</text>
+          <text class="dg-sub" x="400" y="169" text-anchor="middle" lang="en">RU or not?</text>
+
+          <rect class="dg-ru" x="600" y="20" width="210" height="100" rx="16"/>
+          <text class="dg-title" x="705" y="62" text-anchor="middle" lang="ru">Адреса в России</text>
+          <text class="dg-title" x="705" y="62" text-anchor="middle" lang="en">Russian addresses</text>
+          <text class="dg-sub" x="705" y="86" text-anchor="middle" lang="ru">напрямую через провайдера</text>
+          <text class="dg-sub" x="705" y="86" text-anchor="middle" lang="en">direct via your ISP</text>
+
+          <rect class="dg-ex" x="600" y="180" width="210" height="100" rx="16"/>
+          <text class="dg-title" x="705" y="222" text-anchor="middle" lang="ru">Остальной мир</text>
+          <text class="dg-title" x="705" y="222" text-anchor="middle" lang="en">Everything else</text>
+          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="ru">через ваш WireGuard-выход</text>
+          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="en">via your WireGuard exit</text>
+        </svg>
+
+        <!-- Phone layout: the same picture, top to bottom. -->
+        <svg class="tall" viewBox="0 0 360 450" role="img">
+          <path class="dg-line" d="M180 86 V170"/>
+          <path class="dg-direct" d="M160 250 C 160 300, 92 300, 92 340"/>
+          <path class="dg-tube" d="M200 250 C 200 300, 268 300, 268 340"/>
+          <path class="dg-tunnel" d="M200 250 C 200 300, 268 300, 268 340"/>
+
+          <path id="tA" d="M168 86 V250 C 168 300, 92 300, 92 340" fill="none"/>
+          <path id="tB" d="M192 86 V250 C 192 300, 268 300, 268 340" fill="none"/>
+          <circle class="pkt-d" r="5"><animateMotion dur="3s" repeatCount="indefinite" begin="0s"><mpath href="#tA"/></animateMotion></circle>
+          <circle class="pkt-d" r="5"><animateMotion dur="3s" repeatCount="indefinite" begin="-1.5s"><mpath href="#tA"/></animateMotion></circle>
+          <circle class="pkt-t" r="5"><animateMotion dur="3s" repeatCount="indefinite" begin="-0.75s"><mpath href="#tB"/></animateMotion></circle>
+          <circle class="pkt-t" r="5"><animateMotion dur="3s" repeatCount="indefinite" begin="-2.25s"><mpath href="#tB"/></animateMotion></circle>
+
+          <rect class="dg-node" x="70" y="8" width="220" height="78" rx="16"/>
+          <text class="dg-title" x="180" y="42" text-anchor="middle" lang="ru">Ваши устройства</text>
+          <text class="dg-title" x="180" y="42" text-anchor="middle" lang="en">Your devices</text>
+          <text class="dg-sub" x="180" y="65" text-anchor="middle" lang="ru">ноутбук · ТВ · телефон</text>
+          <text class="dg-sub" x="180" y="65" text-anchor="middle" lang="en">laptop · TV · phone</text>
+
+          <rect class="dg-gw" x="110" y="170" width="140" height="80" rx="16"/>
+          <text class="dg-mono" x="180" y="205" text-anchor="middle">gotun</text>
+          <text class="dg-sub" x="180" y="229" text-anchor="middle" lang="ru">RU или нет?</text>
+          <text class="dg-sub" x="180" y="229" text-anchor="middle" lang="en">RU or not?</text>
+
+          <rect class="dg-ru" x="6" y="340" width="168" height="100" rx="16"/>
+          <text class="dg-title" x="90" y="380" text-anchor="middle" lang="ru">Россия</text>
+          <text class="dg-title" x="90" y="380" text-anchor="middle" lang="en">Russia</text>
+          <text class="dg-sub" x="90" y="404" text-anchor="middle" lang="ru">напрямую</text>
+          <text class="dg-sub" x="90" y="404" text-anchor="middle" lang="en">direct</text>
+          <text class="dg-sub" x="90" y="422" text-anchor="middle" lang="ru">через провайдера</text>
+          <text class="dg-sub" x="90" y="422" text-anchor="middle" lang="en">via your ISP</text>
+
+          <rect class="dg-ex" x="186" y="340" width="168" height="100" rx="16"/>
+          <text class="dg-title" x="270" y="380" text-anchor="middle" lang="ru">Остальной мир</text>
+          <text class="dg-title" x="270" y="380" text-anchor="middle" lang="en">Everything else</text>
+          <text class="dg-sub" x="270" y="404" text-anchor="middle" lang="ru">через ваш</text>
+          <text class="dg-sub" x="270" y="404" text-anchor="middle" lang="en">via your</text>
+          <text class="dg-sub" x="270" y="422" text-anchor="middle">WireGuard</text>
+        </svg>
+
+        <figcaption class="legend">
+          <span class="ld"><i></i><span lang="ru">напрямую</span><span lang="en">direct</span></span>
+          <span class="lt"><i></i><span lang="ru">через туннель WireGuard</span><span lang="en">through the WireGuard tunnel</span></span>
+        </figcaption>
+      </figure>
+
+      <div class="stats">
+        <div class="stat"><b>72k → 12k</b>
+          <span lang="ru">российских IPv4-префиксов после свёртки — один компактный набор nftables</span>
+          <span lang="en">Russian IPv4 prefixes after collapse — one compact nftables set</span></div>
+        <div class="stat"><b>0</b>
+          <span lang="ru">пакетов через userspace: маршрутизирует ядро Linux</span>
+          <span lang="en">packets proxied in userspace: the Linux kernel routes</span></div>
+        <div class="stat"><b>1</b>
+          <span lang="ru">транзакция nft на применение: правила меняются атомарно</span>
+          <span lang="en">nft transaction per apply: rules swap atomically</span></div>
+        <div class="stat"><b>IPv4 + IPv6</b>
+          <span lang="ru">оба семейства адресов классифицируются одинаково</span>
+          <span lang="en">both address families classified the same way</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section id="why">
+    <div class="wrap">
+      <p class="kicker"><span lang="ru">Зачем</span><span lang="en">Why</span></p>
+      <h2 lang="ru">Шлюз, а не VPN на каждом устройстве</h2>
+      <h2 lang="en">One gateway instead of a VPN on every device</h2>
+      <p class="sec-lead" lang="ru">VPN «на всё» ломает российские сервисы, а VPN «по сайтам» приходится настраивать на каждом устройстве и обновлять вручную. gotun переносит это решение в одно место — туда, через что и так идёт весь трафик дома.</p>
+      <p class="sec-lead" lang="en">A full VPN breaks Russian services, and per-site VPN rules have to be set up on every device and kept up to date by hand. gotun moves that decision to one place — the box all your home traffic already goes through.</p>
+
+      <div class="why">
+        <div class="why-card d">
+          <span class="tag">direct</span>
+          <h3 lang="ru">Российские сервисы видят российский адрес</h3>
+          <h3 lang="en">Russian services see a Russian address</h3>
+          <p lang="ru">Банки, Госуслуги, доставка и онлайн-кинотеатры работают так, будто VPN нет: их трафик и DNS-запросы идут напрямую через провайдера.</p>
+          <p lang="en">Banks, government services, delivery and streaming behave as if there were no VPN: their traffic and DNS go straight out through your ISP.</p>
+        </div>
+        <div class="why-card t">
+          <span class="tag">wg-exit</span>
+          <h3 lang="ru">Остальное — через сервер, который вы контролируете</h3>
+          <h3 lang="en">Everything else goes through a server you control</h3>
+          <p lang="ru">Зарубежный трафик уходит через ваш собственный WireGuard-сервер. Никаких чужих подписок и аккаунтов.</p>
+          <p lang="en">Foreign traffic leaves through your own WireGuard server. No third-party subscriptions, no accounts.</p>
+        </div>
+        <div class="why-card n">
+          <span class="tag">clients: dumb</span>
+          <h3 lang="ru">Устройствам ничего не нужно знать</h3>
+          <h3 lang="en">Devices don't need to know anything</h3>
+          <p lang="ru">Телевизору, приставке и ноутбуку гостя нужен только шлюз по умолчанию. Вся логика «Россия или нет» живёт на шлюзе.</p>
+          <p lang="en">A TV, a set-top box or a guest's laptop only needs a default gateway. All of the "Russia or not" logic lives on the gateway.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <p class="kicker"><span lang="ru">Возможности</span><span lang="en">Features</span></p>
+      <h2 lang="ru">Что внутри</h2>
+      <h2 lang="en">What's inside</h2>
+      <p class="sec-lead" lang="ru">Маленький набор программ на Go, который настраивает ядро и не мешается под ногами.</p>
+      <p class="sec-lead" lang="en">A small set of Go programs that configure the kernel and then get out of the way.</p>
+
+      <div class="features">
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg></div>
+          <h3 lang="ru">Работает ядро</h3><h3 lang="en">The kernel does the work</h3>
+          <p lang="ru">nftables, policy routing и WireGuard. gotun только приводит состояние ядра к нужному — пакеты через себя не гоняет.</p>
+          <p lang="en">nftables, policy routing and WireGuard. gotun only reconciles kernel state — packets never pass through it.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
+          <h3 lang="ru">Без утечек при падении</h3><h3 lang="en">Fail-closed</h3>
+          <p lang="ru">Если туннель упал, зарубежный трафик упирается в blackhole, а не уходит молча через провайдера. Российские адреса продолжают работать.</p>
+          <p lang="en">If the tunnel drops, foreign traffic hits a blackhole instead of quietly leaking out your ISP. Russian addresses keep working.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg></div>
+          <h3 lang="ru">iPhone без приложений</h3><h3 lang="en">iPhone with no app</h3>
+          <p lang="ru">Профиль <code>.mobileconfig</code> для встроенного клиента IKEv2. Аппаратные keepalive берегут батарею, On-Demand включается сам вне дома.</p>
+          <p lang="en">A <code>.mobileconfig</code> for the built-in IKEv2 client. Hardware keepalives save battery; On-Demand connects by itself away from home.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></div>
+          <h3 lang="ru">Пароль на человека</h3><h3 lang="en">One credential per person</h3>
+          <p lang="ru"><code>gotun ikev2 user add / list / revoke</code>. Отзыв не только удаляет пароль, но и рвёт уже открытые сессии.</p>
+          <p lang="en"><code>gotun ikev2 user add / list / revoke</code>. Revoking deletes the credential and also terminates sessions already open.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg></div>
+          <h3 lang="ru">Раздельный DNS</h3><h3 lang="en">Split DNS</h3>
+          <p lang="ru"><code>gotun-dns</code> резолвит <code>.ru</code> через российский DNS, остальное — через туннель. GeoDNS-сервисы отдают «российские» адреса.</p>
+          <p lang="en"><code>gotun-dns</code> resolves <code>.ru</code> through a Russian resolver and the rest through the tunnel, so GeoDNS services hand out their Russian servers.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h7"/><path d="M17 14l4 4-4 4"/></svg></div>
+          <h3 lang="ru">IPv6 тоже</h3><h3 lang="en">IPv6 too</h3>
+          <p lang="ru">IPv6 классифицируется так же, как IPv4. Если туннель IPv6 не несёт, gotun предупреждает об этом при каждом применении, а не молчит.</p>
+          <p lang="en">IPv6 is classified just like IPv4. If the tunnel can't carry IPv6, gotun warns on every apply instead of staying quiet.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 17h.01M11 17h.01M8 13l-2-6M16 13l2-6"/></svg></div>
+          <h3 lang="ru">Роутер с OpenWrt</h3><h3 lang="en">OpenWrt routers</h3>
+          <p lang="ru">Запускается через procd, туннель остаётся под управлением netifd и виден в LuCI. Проверено на GL.iNet Flint 2.</p>
+          <p lang="en">Runs under procd while netifd keeps owning the tunnel, so it stays visible in LuCI. Tested on a GL.iNet Flint 2.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 01-1 1H4a1 1 0 01-1-1z"/><rect x="9" y="13" width="6" height="8"/></svg></div>
+          <h3 lang="ru">Домашняя сеть закрыта</h3><h3 lang="en">Home LAN stays private</h3>
+          <p lang="ru">Подключённые снаружи телефоны и ноутбуки получают тот же раздельный маршрут, но не видят устройства в вашей домашней сети.</p>
+          <p lang="en">Phones and laptops connecting from outside get the same split routing, but cannot reach the devices on your home network.</p>
+        </div>
+      </div>
+      <p class="also" lang="ru">А ещё: экспорт списка сетей для клиента Amnezia и <code>gotun-client</code> — переключение Linux-десктопа на шлюз с автоматическим откатом, если что-то пошло не так.</p>
+      <p class="also" lang="en">Also: export of the network list for the Amnezia client, and <code>gotun-client</code> — switches a Linux desktop onto the gateway with an automatic rollback if anything goes wrong.</p>
+    </div>
+  </section>
+
+  <section id="tested">
+    <div class="wrap">
+      <p class="kicker"><span lang="ru">Тесты</span><span lang="en">Testing</span></p>
+      <h2 lang="ru">Проверено, а не обещано</h2>
+      <h2 lang="en">Tested, not promised</h2>
+
+      <div class="tested">
+        <div>
+          <ul class="checks">
+            <li lang="ru"><span><b>Сетевые лаборатории в Docker на каждый пуш:</b> клиент, шлюз, выход, российский и зарубежный хосты в изолированных сетях.</span></li>
+            <li lang="en"><span><b>Docker network labs on every push:</b> a client, the gateway, an exit, plus Russian and foreign hosts on isolated networks.</span></li>
+            <li lang="ru"><span><b>Лаборатория OpenWrt</b> с настоящим procd в роли PID 1, netifd и fw3.</span></li>
+            <li lang="en"><span><b>An OpenWrt lab</b> with real procd as PID 1, plus netifd and fw3.</span></li>
+            <li lang="ru"><span><b>CI падает, если тест пропустил сам себя.</b> «Пропущено» не выдаётся за «прошло».</span></li>
+            <li lang="en"><span><b>CI fails if any test skipped itself.</b> "Skipped" never passes for "passed".</span></li>
+            <li lang="ru"><span><b>Проверка перед деплоем:</b> <code>gotun check</code> только читает конфиг и показывает, с какими настройками запустится сервис.</span></li>
+            <li lang="en"><span><b>A pre-deploy gate:</b> <code>gotun check</code> only reads the config and prints the settings the service will really run with.</span></li>
+          </ul>
+          <div class="field">
+            <p class="kicker"><span lang="ru">Найдено на живом роутере</span><span lang="en">Found on a live router</span></p>
+            <p lang="ru">На GL.iNet GL-MT6000 аппаратный offload замедлял прямой трафик клиентов в 450 раз — с 1,8 МБ/с до 5 КБ/с, — а ping при этом был идеальным. Флаг <code>-direct-snat</code> это исправляет.</p>
+            <p lang="en">On a GL.iNet GL-MT6000, hardware flow offload slowed clients' direct traffic 450× — from 1.8 MB/s to 5 KB/s — while ping looked perfect. The <code>-direct-snat</code> flag fixes it.</p>
+          </div>
+        </div>
+
+        <div class="term" aria-label="Integration test suites">
+          <div class="term-bar"><i></i><i></i><i></i><span>make test-integration</span></div>
+          <div class="term-body">
+            <div class="term-row"><span class="f">topology_test.go</span>
+              <span class="d" lang="ru">ядро и политика: RU напрямую, остальное в туннель</span>
+              <span class="d" lang="en">kernel and policy: RU direct, the rest tunnelled</span></div>
+            <div class="term-row"><span class="f">lan_deploy_test.go</span>
+              <span class="d" lang="ru">проброс порта на роутере и изоляция домашней сети</span>
+              <span class="d" lang="en">router port-forward and home LAN isolation</span></div>
+            <div class="term-row"><span class="f">deploy_topo_test.go</span>
+              <span class="d" lang="ru">какой адрес видит сайт: российский или выходной</span>
+              <span class="d" lang="en">which address a site sees: Russian or exit</span></div>
+            <div class="term-row"><span class="f">phone_deploy_test.go</span>
+              <span class="d" lang="ru">телефон снаружи через WireGuard</span>
+              <span class="d" lang="en">a phone tunnelling in over WireGuard</span></div>
+            <div class="term-row"><span class="f">ikev2_phone_test.go</span>
+              <span class="d" lang="ru">то же через IKEv2, роуминг MOBIKE</span>
+              <span class="d" lang="en">the same over IKEv2, with MOBIKE roaming</span></div>
+            <div class="term-row"><span class="f">multitransport_test.go</span>
+              <span class="d" lang="ru">IKEv2, WireGuard и домашняя сеть одновременно</span>
+              <span class="d" lang="en">IKEv2, WireGuard and the home LAN at once</span></div>
+            <div class="term-row"><span class="f">ikev2_users_test.go</span>
+              <span class="d" lang="ru">личные пароли и отзыв активных сессий</span>
+              <span class="d" lang="en">per-person credentials and revoking live sessions</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <p class="kicker"><span lang="ru">Установка</span><span lang="en">Install</span></p>
+      <h2 lang="ru">Три шага до раздельного маршрута</h2>
+      <h2 lang="en">Three steps to split routing</h2>
+
+      <div class="steps">
+        <div class="step">
+          <h3 lang="ru">Соберите список сетей</h3><h3 lang="en">Build the network list</h3>
+          <p lang="ru"><code>gotun fetch</code> берёт российские сети из базы MaxMind GeoLite2 — нужен бесплатный ключ.</p>
+          <p lang="en"><code>gotun fetch</code> pulls Russian networks from MaxMind GeoLite2 — a free key is enough.</p>
+        </div>
+        <div class="step">
+          <h3 lang="ru">Примените политику</h3><h3 lang="en">Apply the policy</h3>
+          <p lang="ru"><code>gotun apply</code> создаёт таблицу nftables, правило маршрутизации и туннель. Повторный запуск ничего не ломает.</p>
+          <p lang="en"><code>gotun apply</code> creates the nftables table, the routing rule and the tunnel. Running it again changes nothing.</p>
+        </div>
+        <div class="step">
+          <h3 lang="ru">Направьте устройства</h3><h3 lang="en">Point your devices</h3>
+          <p lang="ru">Шлюз через DHCP или вручную, <code>gotun-client</code> для Linux-десктопа, профиль IKEv2 для iPhone.</p>
+          <p lang="en">Set the gateway via DHCP or by hand, use <code>gotun-client</code> on a Linux desktop, an IKEv2 profile on an iPhone.</p>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Install target">
+        <button type="button" role="tab" aria-selected="true" aria-controls="p-linux" id="t-linux">Linux · Raspberry Pi</button>
+        <button type="button" role="tab" aria-selected="false" aria-controls="p-openwrt" id="t-openwrt">OpenWrt</button>
+        <button type="button" role="tab" aria-selected="false" aria-controls="p-iphone" id="t-iphone">iPhone · IKEv2</button>
+      </div>
+
+      <div class="panel" id="p-linux" role="tabpanel" aria-labelledby="t-linux">
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>git clone https://github.com/Legion112/go-tun.git &amp;&amp; cd go-tun
+<span class="p">$ </span>make build
+<span class="p">$ </span>export MAXMIND_LICENSE_KEY=&lt;your-key&gt;
+<span class="p">$ </span>bin/gotun fetch -country RU -out prefixes.txt
+<span class="p">$ </span>sudo bin/gotun apply -prefixes prefixes.txt \
+    -endpoint &lt;exit-server-ip&gt; -lan 192.168.1.0/24 \
+    -wg-config wg-exit.conf -tunnel-up true</code></pre></div>
+        <p class="panel-note" lang="ru">Откат — <code>sudo bin/gotun clear</code>: он убирает только то, что создал gotun. Подробности в <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
+        <p class="panel-note" lang="en">To roll back, <code>sudo bin/gotun clear</code> removes only what gotun created. Details in the <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
+      </div>
+
+      <div class="panel" id="p-openwrt" role="tabpanel" aria-labelledby="t-openwrt" hidden>
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>make build-arm64
+<span class="p">$ </span>scp bin/gotun-linux-arm64 root@router:/usr/bin/gotun
+<span class="p">$ </span>scp deploy/openwrt/gotun.init root@router:/etc/init.d/gotun
+<span class="p">$ </span>ssh root@router 'gotun check -config /etc/gotun/gotun.conf'
+<span class="p">$ </span>ssh root@router '/etc/init.d/gotun enable'</code></pre></div>
+        <p class="panel-note" lang="ru">Это сокращённо: hotplug-хуки, конфиг и пример для sing-box — в <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">инструкции для OpenWrt</a>.</p>
+        <p class="panel-note" lang="en">This is the short version: hotplug hooks, the config file and a sing-box example are in the <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">OpenWrt guide</a>.</p>
+      </div>
+
+      <div class="panel" id="p-iphone" role="tabpanel" aria-labelledby="t-iphone" hidden>
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>gotun ikev2 user add alice -server vpn.example.net \
+    -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 \
+    -pool 10.231.17.16/28 -ca ca.pem \
+    -probe-url http://vpn.example.net:8443/alive
+<span class="c"># → alice.mobileconfig: AirDrop it to the phone</span>
+<span class="p">$ </span>gotun ikev2 user list
+<span class="p">$ </span>gotun ikev2 user revoke alice</code></pre></div>
+        <p class="panel-note" lang="ru">Пароль показывается один раз и нигде не хранится. Почему маршруты на iPhone устроены именно так — в <a href="https://github.com/Legion112/go-tun/blob/master/docs/ikev2-phone.md">docs/ikev2-phone.md</a>.</p>
+        <p class="panel-note" lang="en">The password is printed once and stored nowhere else. Why the iPhone's routes are shaped the way they are: <a href="https://github.com/Legion112/go-tun/blob/master/docs/ikev2-phone.md">docs/ikev2-phone.md</a>.</p>
+      </div>
+
+      <div class="req">
+        <div><b lang="ru">Linux или OpenWrt</b><b lang="en">Linux or OpenWrt</b><span lang="ru">с nftables: Raspberry Pi, мини-ПК или роутер</span><span lang="en">with nftables: a Raspberry Pi, a mini PC or a router</span></div>
+        <div><b lang="ru">Свой сервер вне России</b><b lang="en">Your own server abroad</b><span lang="ru">любой VPS с WireGuard</span><span lang="en">any VPS running WireGuard</span></div>
+        <div><b>Go 1.26+</b><span lang="ru">для сборки из исходников</span><span lang="en">to build from source</span></div>
+        <div><b lang="ru">Ключ MaxMind</b><b lang="en">A MaxMind key</b><span lang="ru">бесплатный, для GeoLite2</span><span lang="en">free, for GeoLite2</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <p class="kicker">FAQ</p>
+      <h2 lang="ru">Частые вопросы</h2>
+      <h2 lang="en">Questions</h2>
+      <div class="faq">
+        <details>
+          <summary><span lang="ru">Это VPN-сервис?</span><span lang="en">Is this a VPN service?</span></summary>
+          <p lang="ru">Нет. gotun — программа для вашего собственного шлюза. Выходной сервер вы арендуете и настраиваете сами; у проекта нет ни аккаунтов, ни подписок, ни серверов.</p>
+          <p lang="en">No. gotun is software for your own gateway. You rent and set up the exit server yourself; the project has no accounts, no subscriptions and no servers.</p>
+        </details>
+        <details>
+          <summary><span lang="ru">Что нужно ставить на устройства?</span><span lang="en">What do I install on my devices?</span></summary>
+          <p lang="ru">Устройствам в домашней сети — ничего, достаточно указать шлюз. Для iPhone вне дома gotun генерирует профиль для встроенного клиента IKEv2. Для Linux-десктопа есть <code>gotun-client</code> с автоматическим откатом.</p>
+          <p lang="en">Nothing for devices on your home network — just point them at the gateway. For an iPhone away from home, gotun generates a profile for the built-in IKEv2 client. For a Linux desktop there's <code>gotun-client</code>, with automatic rollback.</p>
+        </details>
+        <details>
+          <summary><span lang="ru">Что будет, если туннель упадёт?</span><span lang="en">What happens if the tunnel goes down?</span></summary>
+          <p lang="ru">Зарубежный трафик упрётся в blackhole и не уйдёт через провайдера, пока туннель не вернётся. Российские адреса продолжат работать как обычно.</p>
+          <p lang="en">Foreign traffic hits a blackhole and does not go out through your ISP until the tunnel is back. Russian addresses keep working as usual.</p>
+        </details>
+        <details>
+          <summary><span lang="ru">А при ограничениях мобильного интернета?</span><span lang="en">What about mobile internet restrictions?</span></summary>
+          <p lang="ru">Честно: в режиме «белых списков» мобильная сеть может не пропустить телефон до домашнего шлюза. Дома по Wi-Fi и проводу всё работает как обычно. Мы изучаем, что здесь возможно.</p>
+          <p lang="en">Honestly: in whitelist mode a mobile network may not let a phone reach the home gateway at all. At home, over Wi-Fi or a cable, everything works as usual. We're researching what is possible here.</p>
+        </details>
+        <details>
+          <summary><span lang="ru">Есть готовые сборки?</span><span lang="en">Are there prebuilt binaries?</span></summary>
+          <p lang="ru">Пока нет: gotun собирается из исходников одной командой — <code>make build</code>, а для роутеров на arm64, например GL.iNet, — <code>make build-arm64</code>.</p>
+          <p lang="en">Not yet: gotun builds from source in one command — <code>make build</code>, or <code>make build-arm64</code> for arm64 routers such as GL.iNet.</p>
+        </details>
+      </div>
+
+      <div class="closing">
+        <h2 lang="ru">Попробуйте на своём роутере</h2>
+        <h2 lang="en">Try it on your own router</h2>
+        <p lang="ru">Начните с <code>gotun check</code> — он ничего не меняет, только показывает, что будет.</p>
+        <p lang="en">Start with <code>gotun check</code> — it changes nothing and only shows what would happen.</p>
+        <div class="ctas">
+          <a class="btn btn-primary" href="https://github.com/Legion112/go-tun"><span lang="ru">Открыть на GitHub</span><span lang="en">Open on GitHub</span></a>
+          <a class="btn btn-ghost" href="#start"><span lang="ru">К установке</span><span lang="en">Back to install</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>gotun</span>
+    <nav>
+      <a href="https://github.com/Legion112/go-tun#readme">README</a>
+      <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">OpenWrt</a>
+      <a href="https://github.com/Legion112/go-tun/blob/master/docs/ikev2-phone.md">iPhone · IKEv2</a>
+      <a href="https://github.com/Legion112/go-tun/issues">Issues</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var titles = {
+    ru: "gotun — российское напрямую, остальное через туннель",
+    en: "gotun — Russian traffic direct, the rest through your tunnel"
+  };
+
+  function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+  function setLang(lang, remember) {
+    if (lang !== "ru" && lang !== "en") return;
+    root.setAttribute("data-lang", lang);
+    root.setAttribute("lang", lang);
+    document.title = titles[lang];
+    document.querySelectorAll("[data-set-lang]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-set-lang") === lang));
+    });
+    document.querySelectorAll(".copy").forEach(function (b) {
+      if (!b.dataset.busy) b.textContent = lang === "ru" ? "Копировать" : "Copy";
+    });
+    if (remember) store("gotun-lang", lang);
+  }
+
+  // An explicit ?lang= wins, then the visitor's earlier choice, then the
+  // browser. Anything that is not Russian falls back to English.
+  var q = new URLSearchParams(location.search).get("lang");
+  var nav = (navigator.language || "").toLowerCase().indexOf("ru") === 0 ? "ru" : "en";
+  setLang(q || load("gotun-lang") || nav, false);
+
+  document.querySelectorAll("[data-set-lang]").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.getAttribute("data-set-lang"), true); });
+  });
+
+  var tabs = document.querySelectorAll('[role="tab"]');
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      tabs.forEach(function (o) {
+        var on = o === t;
+        o.setAttribute("aria-selected", String(on));
+        document.getElementById(o.getAttribute("aria-controls")).hidden = !on;
+      });
+    });
+  });
+
+  document.querySelectorAll(".copy").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = b.parentNode.querySelector("code").innerText
+        .split("\n")
+        .filter(function (l) { return l.trim().indexOf("#") !== 0; })
+        .map(function (l) { return l.replace(/^\$ /, ""); })
+        .join("\n");
+      var lang = root.getAttribute("data-lang");
+      var done = function (ok) {
+        b.dataset.busy = "1";
+        b.textContent = ok ? (lang === "ru" ? "Скопировано" : "Copied") : (lang === "ru" ? "Не вышло" : "Failed");
+        setTimeout(function () { delete b.dataset.busy; b.textContent = lang === "ru" ? "Копировать" : "Copy"; }, 1600);
+      };
+      try {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+      } catch (e) { done(false); }
+    });
+  });
+})();
+</script>
+</body>
+</html>
