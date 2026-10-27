@@ -4,3 +4,4 @@
 .idea/
 data/geo/*.mmdb
 output
+/dist/

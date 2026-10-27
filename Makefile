@@ -9,7 +9,28 @@ MMDB := data/geo/GeoIP2-City.mmdb
 
 FUZZTIME ?= 30s
 
-.PHONY: all build build-arm64 build-client-arm64 test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy verify-router check-router fetch-prefixes clean
+# Release binaries, one per platform, named <binary>-linux-<target>. Static,
+# trimmed and stripped: routers have little flash and no glibc.
+#
+#   amd64   mini PCs, VPS
+#   arm64   GL.iNet MT6000/Flint 2 and other filogic/mvebu routers, Pi 3/4/5 on a 64-bit OS
+#   armv7   Pi 2/3 on a 32-bit OS, ipq40xx routers
+#   mipsle  MT7621/MT76x8 routers (GL.iNet MT1300, Xiaomi 4A, ...)
+#   mips    ath79 routers (GL.iNet AR750, TP-Link Archer C7, ...)
+#
+# OpenWrt MIPS targets have no FPU, hence softfloat. gotun-client drives
+# NetworkManager on a desktop, so it is built only where desktops are.
+DIST := dist
+RELEASE_TARGETS := amd64 arm64 armv7 mipsle mips
+CLIENT_TARGETS := amd64 arm64
+RELEASE_FLAGS := -trimpath -ldflags "-s -w"
+goenv_amd64 := GOARCH=amd64
+goenv_arm64 := GOARCH=arm64
+goenv_armv7 := GOARCH=arm GOARM=7
+goenv_mipsle := GOARCH=mipsle GOMIPS=softfloat
+goenv_mips := GOARCH=mips GOMIPS=softfloat
+
+.PHONY: all build build-arm64 build-client-arm64 release test vet fuzz test-integration test-nft-real test-large-set docker-build docker-build-openwrt test-deploy verify-router check-router fetch-prefixes clean
 
 all: build test
 
@@ -30,6 +51,18 @@ build-arm64:
 build-client-arm64:
 	mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -o $(CLIENT_ARM64) ./cmd/gotun-client
+
+# The version printed by `gotun version` comes from the git tag at HEAD, so tag
+# before running this for a release; between tags it is a pseudo-version.
+release:
+	rm -rf $(DIST)
+	mkdir -p $(DIST)
+	$(foreach t,$(RELEASE_TARGETS), \
+		CGO_ENABLED=0 GOOS=linux $(goenv_$(t)) $(GO) build $(RELEASE_FLAGS) -o $(DIST)/gotun-linux-$(t) ./cmd/gotun && \
+		CGO_ENABLED=0 GOOS=linux $(goenv_$(t)) $(GO) build $(RELEASE_FLAGS) -o $(DIST)/gotun-dns-linux-$(t) ./cmd/gotun-dns &&) true
+	$(foreach t,$(CLIENT_TARGETS), \
+		CGO_ENABLED=0 GOOS=linux $(goenv_$(t)) $(GO) build $(RELEASE_FLAGS) -o $(DIST)/gotun-client-linux-$(t) ./cmd/gotun-client &&) true
+	cd $(DIST) && sha256sum gotun* > SHA256SUMS
 
 test:
 	$(GO) test ./...
@@ -176,4 +209,4 @@ fetch-prefixes: build
 	fi
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ $(DIST)/

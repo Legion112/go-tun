@@ -383,6 +383,38 @@ ikev2_users_test.go    → named credentials, identity attribution, revocation
 - RU destination sees **home-router WAN**
 - non-RU destination sees **remote-hop**
 
+## Download
+
+Every [release](https://github.com/Legion112/go-tun/releases) carries static
+Linux binaries and a `SHA256SUMS`:
+
+| Target | Hardware |
+|---|---|
+| `amd64` | mini PCs, VPS |
+| `arm64` | GL.iNet MT6000 (Flint 2) and other filogic routers, Raspberry Pi 3/4/5 on a 64-bit OS |
+| `armv7` | Raspberry Pi 2/3 on a 32-bit OS, ipq40xx routers |
+| `mipsle` | MT7621 / MT76x8 routers |
+| `mips` | ath79 routers |
+
+`gotun` and `gotun-dns` are built for all five, `gotun-client` for `amd64` and
+`arm64` only, since it drives NetworkManager on a desktop.
+
+```bash
+curl -LO https://github.com/Legion112/go-tun/releases/latest/download/gotun-linux-arm64
+curl -LO https://github.com/Legion112/go-tun/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+On OpenWrt, `DISTRIB_ARCH` in `/etc/openwrt_release` names the target:
+`aarch64_*` is `arm64`, `arm_cortex-a7*` and the like are `armv7`, `mipsel_*` is
+`mipsle` and `mips_*` is `mips`. A binary for the wrong one fails with a bare
+`not found` from the shell, so check before blaming anything else.
+
+`gotun version` prints the release tag, the architecture and the commit. Before a
+release is published, every binary is executed under qemu-user on its own
+architecture: the labs all run amd64, so otherwise "it compiles" would be all
+anyone knew about the MIPS and ARM builds.
+
 ## Build & test
 
 Requires Go **1.26+**. Integration and large-set tests talk to the Docker **daemon** via the Engine API (socket / `DOCKER_HOST`); the `docker` CLI is only needed for `make docker-build`.
@@ -398,6 +430,7 @@ licensed MaxMind data is not in the repository.
 
 ```bash
 make build               # bin/gotun
+make release             # dist/: static binaries for every target, plus SHA256SUMS
 make test                # unit tests only (large MMDB compile/render if MMDB present)
 make docker-build        # gotun:lab image (docker CLI)
 make test-integration    # GOTUN_INTEGRATION=1; isolated Docker nets

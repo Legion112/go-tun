@@ -15,14 +15,26 @@ torn down.
 
 ## Install
 
+The binary comes from a [release](https://github.com/Legion112/go-tun/releases)
+or from this tree; the scripts below come from the tree either way. Pick the
+release binary matching `DISTRIB_ARCH` in the router's `/etc/openwrt_release`
+(see **Download** in the top-level README) — `arm64` on a Flint 2:
+
 ```sh
-make build-arm64
-scp bin/gotun-linux-arm64 root@router:/usr/bin/gotun
+curl -LO https://github.com/Legion112/go-tun/releases/latest/download/gotun-linux-arm64
+scp gotun-linux-arm64 root@router:/usr/bin/gotun
+```
+
+or build it here with `make build-arm64` and copy `bin/gotun-linux-arm64`
+instead. Then the scripts:
+
+```sh
 scp deploy/openwrt/gotun.init root@router:/etc/init.d/gotun
 ssh root@router 'mkdir -p /etc/hotplug.d/net'
 scp deploy/openwrt/hotplug-iface-gotun root@router:/etc/hotplug.d/iface/99-gotun
 scp deploy/openwrt/hotplug-iface-gotun root@router:/etc/hotplug.d/net/99-gotun
 ssh root@router 'chmod +x /usr/bin/gotun /etc/init.d/gotun /etc/hotplug.d/iface/99-gotun /etc/hotplug.d/net/99-gotun'
+ssh root@router 'gotun version'   # names the architecture; "not found" means the wrong binary
 ```
 
 Both directories, and that is not belt-and-braces. The two kinds of hotplug

@@ -691,25 +691,26 @@ footer a:hover { color: var(--text); }
       </div>
 
       <div class="panel" id="p-linux" role="tabpanel" aria-labelledby="t-linux">
-        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>git clone https://github.com/Legion112/go-tun.git &amp;&amp; cd go-tun
-<span class="p">$ </span>make build
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>curl -LO https://github.com/Legion112/go-tun/releases/latest/download/gotun-linux-arm64
+<span class="p">$ </span>sudo install -m 755 gotun-linux-arm64 /usr/local/bin/gotun
 <span class="p">$ </span>export MAXMIND_LICENSE_KEY=&lt;your-key&gt;
-<span class="p">$ </span>bin/gotun fetch -country RU -out prefixes.txt
-<span class="p">$ </span>sudo bin/gotun apply -prefixes prefixes.txt \
+<span class="p">$ </span>gotun fetch -country RU -out prefixes.txt
+<span class="p">$ </span>sudo gotun apply -prefixes prefixes.txt \
     -endpoint &lt;exit-server-ip&gt; -lan 192.168.1.0/24 \
     -wg-config wg-exit.conf -tunnel-up true</code></pre></div>
-        <p class="panel-note" lang="ru">Откат — <code>sudo bin/gotun clear</code>: он убирает только то, что создал gotun. Подробности в <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
-        <p class="panel-note" lang="en">To roll back, <code>sudo bin/gotun clear</code> removes only what gotun created. Details in the <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
+        <p class="panel-note" lang="ru"><code>arm64</code> — для Raspberry Pi на 64-битной ОС, для мини-ПК замените на <code>amd64</code>. Откат — <code>sudo gotun clear</code>: он убирает только то, что создал gotun. Подробности в <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
+        <p class="panel-note" lang="en"><code>arm64</code> is for a Raspberry Pi on a 64-bit OS; on a mini PC use <code>amd64</code>. To roll back, <code>sudo gotun clear</code> removes only what gotun created. Details in the <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
       </div>
 
       <div class="panel" id="p-openwrt" role="tabpanel" aria-labelledby="t-openwrt" hidden>
-        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>make build-arm64
-<span class="p">$ </span>scp bin/gotun-linux-arm64 root@router:/usr/bin/gotun
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>curl -LO https://github.com/Legion112/go-tun/releases/latest/download/gotun-linux-arm64
+<span class="p">$ </span>scp gotun-linux-arm64 root@router:/usr/bin/gotun
+<span class="p">$ </span>ssh root@router 'chmod +x /usr/bin/gotun &amp;&amp; gotun version'
 <span class="p">$ </span>scp deploy/openwrt/gotun.init root@router:/etc/init.d/gotun
 <span class="p">$ </span>ssh root@router 'gotun check -config /etc/gotun/gotun.conf'
 <span class="p">$ </span>ssh root@router '/etc/init.d/gotun enable'</code></pre></div>
-        <p class="panel-note" lang="ru">Это сокращённо: hotplug-хуки, конфиг и пример для sing-box — в <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">инструкции для OpenWrt</a>.</p>
-        <p class="panel-note" lang="en">This is the short version: hotplug hooks, the config file and a sing-box example are in the <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">OpenWrt guide</a>.</p>
+        <p class="panel-note" lang="ru"><code>arm64</code> — для GL.iNet Flint 2 и других роутеров на MT798x. Для MT7621 нужен <code>mipsle</code>, для ath79 — <code>mips</code>, для ipq40xx — <code>armv7</code>: смотрите <code>DISTRIB_ARCH</code> в <code>/etc/openwrt_release</code>. Это сокращённо: hotplug-хуки, конфиг и пример для sing-box — в <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">инструкции для OpenWrt</a>.</p>
+        <p class="panel-note" lang="en"><code>arm64</code> is for a GL.iNet Flint 2 and other MT798x routers. MT7621 needs <code>mipsle</code>, ath79 <code>mips</code>, ipq40xx <code>armv7</code>: check <code>DISTRIB_ARCH</code> in <code>/etc/openwrt_release</code>. This is the short version: hotplug hooks, the config file and a sing-box example are in the <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">OpenWrt guide</a>.</p>
       </div>
 
       <div class="panel" id="p-iphone" role="tabpanel" aria-labelledby="t-iphone" hidden>
@@ -727,7 +728,7 @@ footer a:hover { color: var(--text); }
       <div class="req">
         <div><b lang="ru">Linux или OpenWrt</b><b lang="en">Linux or OpenWrt</b><span lang="ru">с nftables: Raspberry Pi, мини-ПК или роутер</span><span lang="en">with nftables: a Raspberry Pi, a mini PC or a router</span></div>
         <div><b lang="ru">Свой сервер вне России</b><b lang="en">Your own server abroad</b><span lang="ru">любой VPS с WireGuard</span><span lang="en">any VPS running WireGuard</span></div>
-        <div><b>Go 1.26+</b><span lang="ru">для сборки из исходников</span><span lang="en">to build from source</span></div>
+        <div><b lang="ru">Готовый бинарник</b><b lang="en">A prebuilt binary</b><span>amd64 · arm64 · armv7 · mips · mipsle</span></div>
         <div><b lang="ru">Ключ MaxMind</b><b lang="en">A MaxMind key</b><span lang="ru">бесплатный, для GeoLite2</span><span lang="en">free, for GeoLite2</span></div>
       </div>
     </div>
@@ -761,8 +762,8 @@ footer a:hover { color: var(--text); }
         </details>
         <details>
           <summary><span lang="ru">Есть готовые сборки?</span><span lang="en">Are there prebuilt binaries?</span></summary>
-          <p lang="ru">Пока нет: gotun собирается из исходников одной командой — <code>make build</code>, а для роутеров на arm64, например GL.iNet, — <code>make build-arm64</code>.</p>
-          <p lang="en">Not yet: gotun builds from source in one command — <code>make build</code>, or <code>make build-arm64</code> for arm64 routers such as GL.iNet.</p>
+          <p lang="ru">Да. В каждом <a href="https://github.com/Legion112/go-tun/releases/latest">релизе</a> — статические бинарники для amd64, arm64, armv7, mips и mipsle с контрольными суммами. Перед публикацией каждый запускается под qemu на своей архитектуре. Собрать самому тоже можно: <code>make build</code>.</p>
+          <p lang="en">Yes. Every <a href="https://github.com/Legion112/go-tun/releases/latest">release</a> has static binaries for amd64, arm64, armv7, mips and mipsle, with checksums. Each one is run under qemu on its own architecture before it is published. You can still build your own with <code>make build</code>.</p>
         </details>
       </div>
 
@@ -773,7 +774,7 @@ footer a:hover { color: var(--text); }
         <p lang="en">Start with <code>gotun check</code> — it changes nothing and only shows what would happen.</p>
         <div class="ctas">
           <a class="btn btn-primary" href="https://github.com/Legion112/go-tun"><span lang="ru">Открыть на GitHub</span><span lang="en">Open on GitHub</span></a>
-          <a class="btn btn-ghost" href="#start"><span lang="ru">К установке</span><span lang="en">Back to install</span></a>
+          <a class="btn btn-ghost" href="https://github.com/Legion112/go-tun/releases/latest"><span lang="ru">Скачать</span><span lang="en">Download</span></a>
         </div>
       </div>
     </div>
@@ -785,6 +786,7 @@ footer a:hover { color: var(--text); }
     <span>gotun</span>
     <nav>
       <a href="https://github.com/Legion112/go-tun#readme">README</a>
+      <a href="https://github.com/Legion112/go-tun/releases">Releases</a>
       <a href="https://github.com/Legion112/go-tun/blob/master/deploy/openwrt/README.md">OpenWrt</a>
       <a href="https://github.com/Legion112/go-tun/blob/master/docs/ikev2-phone.md">iPhone · IKEv2</a>
       <a href="https://github.com/Legion112/go-tun/issues">Issues</a>

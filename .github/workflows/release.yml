@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # A manual run builds and checks every binary and keeps them as a workflow
+  # artifact, without publishing a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build, run on every arch, publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The go command stamps `gotun version` from the tag at HEAD, and a
+          # shallow clone may not have it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: unit tests
+        run: go test ./...
+
+      - name: build
+        run: make release
+
+      # Compiling for an architecture proves nothing about running on it, and
+      # every CI lab is amd64. Each binary is executed under qemu-user so that
+      # a wrong GOARM or a missing softfloat fails here and not on a router.
+      - name: run every binary on its own architecture
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static >/dev/null
+          qemu_for() {
+            case "$1" in
+              amd64)  echo "" ;;
+              arm64)  echo qemu-aarch64-static ;;
+              armv7)  echo qemu-arm-static ;;
+              mipsle) echo qemu-mipsel-static ;;
+              mips)   echo qemu-mips-static ;;
+            esac
+          }
+          for f in dist/gotun-linux-*; do
+            arch=${f##*-}
+            out=$($(qemu_for "$arch") "$f" version)
+            echo "$out"
+            case "$out" in
+              *"linux/"*) ;;
+              *) echo "::error::$f printed no version"; exit 1 ;;
+            esac
+            if [ "$GITHUB_REF_TYPE" = tag ] && ! echo "$out" | grep -qF "gotun $GITHUB_REF_NAME "; then
+              echo "::error::$f reports a version other than $GITHUB_REF_NAME"; exit 1
+            fi
+          done
+          # gotun-dns and gotun-client have no version command, so each is
+          # asked for its usage, which it prints only once it has started.
+          for f in dist/gotun-dns-linux-*; do
+            $(qemu_for "${f##*-}") "$f" -h 2>&1 | grep -q -- '-direct-upstream' \
+              || { echo "::error::$f did not start"; exit 1; }
+            echo "$f starts"
+          done
+          for f in dist/gotun-client-linux-*; do
+            $(qemu_for "${f##*-}") "$f" 2>&1 | grep -q 'usage: gotun-client' \
+              || { echo "::error::$f did not start"; exit 1; }
+            echo "$f starts"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gotun-binaries
+          path: dist/
+
+      - name: publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
