@@ -417,7 +417,7 @@ anyone knew about the MIPS and ARM builds.
 
 ## Build & test
 
-Requires Go **1.26+**. Integration and large-set tests talk to the Docker **daemon** via the Engine API (socket / `DOCKER_HOST`); the `docker` CLI is only needed for `make docker-build`.
+Requires Go **1.27+**. Integration and large-set tests talk to the Docker **daemon** via the Engine API (socket / `DOCKER_HOST`); the `docker` CLI is only needed for `make docker-build`.
 
 CI runs all of it on every push and pull request
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)): gofmt, both `vet`

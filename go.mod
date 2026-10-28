@@ -1,6 +1,6 @@
 module github.com/legion/go-tun
 
-go 1.26.5
+go 1.27.3
 
 require (
 	codeberg.org/miekg/dns v0.6.90

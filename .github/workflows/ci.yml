@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           # From go.mod, so the toolchain cannot drift from what the module
-          # declares. This project needs 1.26 for the stdlib it uses.
+          # declares.
           go-version-file: go.mod
           cache: true
 

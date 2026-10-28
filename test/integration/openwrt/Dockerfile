@@ -16,7 +16,7 @@
 # run on musl unchanged.
 FROM gotun:lab AS bin
 
-FROM golang:1.26-bookworm AS logsink
+FROM golang:1.27-bookworm AS logsink
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY test/integration/openwrt/logsink ./test/integration/openwrt/logsink
