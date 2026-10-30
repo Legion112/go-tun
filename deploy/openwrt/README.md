@@ -575,8 +575,15 @@ were back in the country you were routing around. Check egress identity
 periodically; that is the only symptom.
 
 Route-level fail-open covers the link going down. A tunnel that is *up but dead*
-(no handshake) keeps its route and swallows traffic; detecting that needs a health
-probe flipping `-tunnel-up`, which is not implemented.
+(no handshake) keeps its route and swallows traffic until `gotun watch` notices:
+it probes `GOTUN_PROBE_TARGET` bound to the tunnel device and withdraws the route
+after `GOTUN_FAIL_AFTER` consecutive failures, so the swallowing lasts about
+interval × fail-after.
+
+`GOTUN_FAIL_MODE=closed` keeps a `blackhole default metric 100` under the tunnel
+route instead, so marked traffic is dropped rather than leaked when the tunnel is
+lost. The probe is bound to the device, not routed through table 100, so recovery
+works the same in either mode.
 
 ## Interfaces
 
