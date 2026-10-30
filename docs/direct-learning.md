@@ -11,7 +11,7 @@ measure before building anything that learns at runtime.
 ## The bug we hit
 
 The World Class iPhone app (`com.worldclass.lifestyle`) refused to work,
-reporting that the user was behind a VPN. The app was right.
+reporting that the connection looked like it came from abroad. The app was right.
 
 `worldclass.ru` runs a DNS wildcard, so almost every name under it answers with
 one RU address. Two names do not:
@@ -47,7 +47,7 @@ Three properties make this recur rather than resolve:
 1. **The snapshot is always behind, and nothing tells you how far.** A stale MMDB
    is indistinguishable from a current one at the call site: it answers every
    query confidently. Ours was three years old and the only visible symptom was a
-   gym app complaining about a VPN.
+   gym app complaining about a foreign connection.
 2. **The failure is silent and misattributed.** Nothing errors. The site loads,
    the app starts, and then some server-side check rejects you. The user blames
    the app, the app blames the IP, and nobody blames the routing table. We lost

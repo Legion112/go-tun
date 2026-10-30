@@ -32,7 +32,7 @@ Optional later:
 
 - nft counters on `exclude-endpoint` / mark rules
 - client ListenPort rotation events
-- VPS `wireguard-go` CPU / peer transfer (optional scrape on `vpn`)
+- VPS `wireguard-go` CPU / peer transfer (optional scrape on `exit`)
 
 ## Alert ideas (once scraped)
 
@@ -47,7 +47,7 @@ Optional later:
 N150 ──(textfile / small exporter)──► Prometheus or VictoriaMetrics (on NAS) ──► Grafana
   │                                         ▲
   └── journal / watchdog ──────────────────► Loki (optional) ─┘
-vpn (optional): handshake / peer bytes only
+exit (optional): handshake / peer bytes only
 ```
 
 Guidelines:

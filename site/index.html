@@ -511,18 +511,18 @@ footer a:hover { color: var(--text); }
   <section id="why">
     <div class="wrap">
       <p class="kicker"><span lang="ru">Зачем</span><span lang="en">Why</span></p>
-      <h2 lang="ru">Шлюз, а не VPN на каждом устройстве</h2>
-      <h2 lang="en">One gateway instead of a VPN on every device</h2>
-      <p class="sec-lead" lang="ru">VPN «на всё» ломает российские сервисы, а VPN «по сайтам» приходится настраивать на каждом устройстве и обновлять вручную. gotun переносит это решение в одно место — туда, через что и так идёт весь трафик дома.</p>
-      <p class="sec-lead" lang="en">A full VPN breaks Russian services, and per-site VPN rules have to be set up on every device and kept up to date by hand. gotun moves that decision to one place — the box all your home traffic already goes through.</p>
+      <h2 lang="ru">Один шлюз вместо туннеля на каждом устройстве</h2>
+      <h2 lang="en">One gateway instead of a tunnel on every device</h2>
+      <p class="sec-lead" lang="ru">Туннель «на всё» ломает российские сервисы, а правила «по сайтам» приходится настраивать на каждом устройстве и обновлять вручную. gotun переносит это решение в одно место — туда, через что и так идёт весь трафик дома.</p>
+      <p class="sec-lead" lang="en">Tunnelling everything breaks Russian services, and per-site rules have to be set up on every device and kept up to date by hand. gotun moves that decision to one place — the box all your home traffic already goes through.</p>
 
       <div class="why">
         <div class="why-card d">
           <span class="tag">direct</span>
           <h3 lang="ru">Российские сервисы видят российский адрес</h3>
           <h3 lang="en">Russian services see a Russian address</h3>
-          <p lang="ru">Банки, Госуслуги, доставка и онлайн-кинотеатры работают так, будто VPN нет: их трафик и DNS-запросы идут напрямую через провайдера.</p>
-          <p lang="en">Banks, government services, delivery and streaming behave as if there were no VPN: their traffic and DNS go straight out through your ISP.</p>
+          <p lang="ru">Банки, Госуслуги, доставка и онлайн-кинотеатры работают так, будто туннеля нет: их трафик и DNS-запросы идут напрямую через провайдера.</p>
+          <p lang="en">Banks, government services, delivery and streaming behave as if there were no tunnel: their traffic and DNS go straight out through your ISP.</p>
         </div>
         <div class="why-card t">
           <span class="tag">wg-exit</span>
@@ -714,10 +714,10 @@ footer a:hover { color: var(--text); }
       </div>
 
       <div class="panel" id="p-iphone" role="tabpanel" aria-labelledby="t-iphone" hidden>
-        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>gotun ikev2 user add alice -server vpn.example.net \
+        <div class="code"><button class="copy" type="button">Copy</button><pre><code><span class="p">$ </span>gotun ikev2 user add alice -server gw.example.net \
     -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 \
     -pool 10.231.17.16/28 -ca ca.pem \
-    -probe-url http://vpn.example.net:8443/alive
+    -probe-url http://gw.example.net:8443/alive
 <span class="c"># → alice.mobileconfig: AirDrop it to the phone</span>
 <span class="p">$ </span>gotun ikev2 user list
 <span class="p">$ </span>gotun ikev2 user revoke alice</code></pre></div>
@@ -741,7 +741,7 @@ footer a:hover { color: var(--text); }
       <h2 lang="en">Questions</h2>
       <div class="faq">
         <details>
-          <summary><span lang="ru">Это VPN-сервис?</span><span lang="en">Is this a VPN service?</span></summary>
+          <summary><span lang="ru">Это сервис по подписке?</span><span lang="en">Is this a hosted service?</span></summary>
           <p lang="ru">Нет. gotun — программа для вашего собственного шлюза. Выходной сервер вы арендуете и настраиваете сами; у проекта нет ни аккаунтов, ни подписок, ни серверов.</p>
           <p lang="en">No. gotun is software for your own gateway. You rent and set up the exit server yourself; the project has no accounts, no subscriptions and no servers.</p>
         </details>

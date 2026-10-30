@@ -231,12 +231,12 @@ it runs on.
 An iPhone using Apple's in-kernel IKEv2 client gets two things a WireGuard
 NetworkExtension cannot: NAT-keepalive hardware offload, so the application
 processor does not wake to send keepalives while the phone sleeps, and coarse
-dead-peer detection. That is where phone VPN battery actually goes.
+dead-peer detection. That is where phone tunnel battery actually goes.
 
 ```bash
-gotun ikev2 -server vpn.example.net \
+gotun ikev2 -server gw.example.net \
   -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
-  -probe-url http://vpn.example.net:8443/alive \
+  -probe-url http://gw.example.net:8443/alive \
   -home-ssid HomeWiFi -client-id iphone
 ```
 
@@ -298,9 +298,9 @@ Availability and battery are the same dial.
 ### One credential per person (`gotun ikev2 user`)
 
 ```bash
-gotun ikev2 user add alice -server vpn.example.net \
+gotun ikev2 user add alice -server gw.example.net \
   -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
-  -probe-url http://vpn.example.net:8443/alive
+  -probe-url http://gw.example.net:8443/alive
 
 gotun ikev2 user list
 gotun ikev2 user revoke alice
@@ -449,9 +449,9 @@ gotun amnezia -out amnezia-sites.json -format ios   # CSV download; CIDR in ip (
 gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg-exit.conf -tunnel-up true
 gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
 gotun apply ... -clients-iface ipsec0,wgphone -mark-iface br-lan,ipsec0,wgphone   # inbound ifaces gotun does not own
-gotun ikev2 -server vpn.example.net -vip-subnet 10.231.17.0/24 \
+gotun ikev2 -server gw.example.net -vip-subnet 10.231.17.0/24 \
   -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
-  -probe-url http://vpn.example.net:8443/alive        # swanctl config + iOS .mobileconfig
+  -probe-url http://gw.example.net:8443/alive        # swanctl config + iOS .mobileconfig
 gotun ikev2 user add alice ...                        # one named credential, printed once
 gotun ikev2 user list                                 # plus who is connected, from the daemon
 gotun ikev2 user revoke alice                         # reloads AND terminates their sessions
@@ -472,7 +472,7 @@ By default, `gotun fetch`, `gotun apply`, and `gotun amnezia` run **`Collapse`**
 - `-format official` (default): `{"hostname":"<cidr>","ip":""}` — documented Amnezia / iplist shape
 - `-format ios`: `{"hostname":"site-N","ip":"<cidr>"}` — workaround when iOS import strips `/prefix` from `hostname`
 
-The JSON does not encode route mode. In the Amnezia app, enable site-based split tunneling and choose the mode where **listed sites bypass the VPN** (country CIDRs go direct; everything else uses the tunnel — same intent as gotun).
+The JSON does not encode route mode. In the Amnezia app, enable site-based split tunneling and choose the mode where **listed sites bypass the tunnel** (country CIDRs go direct; everything else uses the tunnel — same intent as gotun).
 
 ### Split DNS (`gotun-dns`)
 

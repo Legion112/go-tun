@@ -30,7 +30,7 @@ It is that Apple's own client gets two things a NetworkExtension cannot:
 - `DeadPeerDetectionRate` is coarse on purpose: `Low` = 30 min, `Medium` =
   10 min, `High` = 1 min, and DPD only runs when the SA is otherwise idle.
 
-Both of those cut radio wakeups, which is where phone VPN battery actually
+Both of those cut radio wakeups, which is where phone tunnel battery actually
 goes. Note the direct consequence for requirement two below: **DPD rate is also
 the fail-open latency.** The battery knob and the availability knob are the same
 knob, turned in opposite directions.
@@ -159,10 +159,10 @@ Requirement two is that a broken tunnel degrades to plain internet rather than
 to no internet. Three separate things have to be true, and only the third is
 gotun's.
 
-**Layer 1 — never arm the kill switch.** Supervised *Always-On* VPN
+**Layer 1 — never arm the kill switch.** Supervised *Always-On* mode
 (`VPNType: AlwaysOn`) blocks traffic when the tunnel is down. Ordinary On-Demand
-does not: `Action: Disconnect` is documented as "tear down the VPN connection,
-prevent reconnect while matching". So this must be a plain IKEv2 payload with
+does not: `Action: Disconnect` is documented as tearing the connection down and
+preventing reconnect while matching. So this must be a plain IKEv2 payload with
 On-Demand rules, never an Always-On payload.
 
 **Layer 2 — gate connecting on a probe, so the phone never sits in limbo.** A
@@ -186,7 +186,7 @@ up, the phone connects into a tunnel whose exit hop is dead, and gotun's
 route-level fail-open then sends it out the RU uplink — silently, which the
 OpenWrt notes already name as the one symptom you have to go looking for. Tie
 the endpoint to the exit-hop health `gotun watch` already computes, and the
-silent leak becomes a VPN icon that is visibly off.
+silent leak becomes a tunnel icon that is visibly off.
 
 **Layer 3 — gotun's own `-fail-mode open`**, which is already the default and
 already tested: the table-100 route is withdrawn, the lookup misses, marked
@@ -451,7 +451,7 @@ controls it, defaulting to `all`, because a resolver that is pushed and never
 used is worse than no resolver -- it reads as working.
 
 **`DNS` is a sibling of `IKEv2`, not a key inside it.** Apple's schema puts it
-at the payload level because it applies to every VPN type. Nested in the
+at the payload level because it applies to every connection type. Nested in the
 `IKEv2` dictionary it is an unknown key, which iOS ignores in silence: the
 profile installs cleanly, looks right, and changes nothing. That shipped once
 here, and the test that was supposed to catch it only checked that the keys
@@ -489,9 +489,9 @@ deploy-time checks against the real phone:
 ## The generator
 
 ```bash
-gotun ikev2 -server vpn.example.net \
+gotun ikev2 -server gw.example.net \
   -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
-  -probe-url http://vpn.example.net:8443/alive \
+  -probe-url http://gw.example.net:8443/alive \
   -home-ssid HomeWiFi -client-id iphone
 ```
 
@@ -512,7 +512,7 @@ files and backups), the xfrm interface, and `gotun apply -clients-iface`.
 
 The UUIDs are derived from the profile identifier rather than random, because
 iOS keys an installed profile by its `PayloadUUID`: a fresh one on every run
-adds a second VPN entry beside the first instead of replacing it, leaving two
+adds a second tunnel entry beside the first instead of replacing it, leaving two
 profiles with the same display name and no way to tell which one On-Demand is
 using.
 
