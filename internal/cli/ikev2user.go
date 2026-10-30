@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/ikev2"
 	"github.com/legion/go-tun/internal/linux"
 )
@@ -60,6 +61,9 @@ func runUserAdd(args []string) error {
 	apply := fs.String("apply", "true",
 		"reload charon so the new user can connect immediately (true|false)")
 	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if err := loadConfigInto(fs, *f.configPath, deployconf.IKEv2UserFlags); err != nil {
 		return err
 	}
 	cfg, err := f.config()
@@ -153,6 +157,9 @@ func runUserProfile(args []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	if err := loadConfigInto(fs, *f.configPath, deployconf.IKEv2UserFlags); err != nil {
+		return err
+	}
 	cfg, err := f.config()
 	if err != nil {
 		return err
@@ -188,7 +195,11 @@ func runUserProfile(args []string) error {
 func runUserList(args []string) error {
 	fs := flag.NewFlagSet("ikev2 user list", flag.ContinueOnError)
 	dir := fs.String("dir", DefaultUserDir, "directory of per-user swanctl snippets")
+	configPath := fs.String("config", "", "read GOTUN_IKEV2_USER_DIR from this gotun.conf")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := loadConfigInto(fs, *configPath, deployconf.IKEv2DirFlags); err != nil {
 		return err
 	}
 	users, err := ikev2.Store{Dir: *dir}.List()
@@ -247,7 +258,11 @@ func runUserRevoke(args []string) error {
 	apply := fs.String("apply", "true",
 		"reload charon and tear down the user's live sessions (true|false)."+
 			" false leaves a revocation that has not taken effect")
+	configPath := fs.String("config", "", "read GOTUN_IKEV2_USER_DIR from this gotun.conf")
 	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if err := loadConfigInto(fs, *configPath, deployconf.IKEv2DirFlags); err != nil {
 		return err
 	}
 

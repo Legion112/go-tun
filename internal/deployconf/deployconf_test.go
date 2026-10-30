@@ -330,15 +330,60 @@ func TestMappings_AreOneToOne(t *testing.T) {
 	}
 }
 
-// Both mappings over gotun.conf must stay disjoint in their flag names too.
-// A name in both would have one command's setting silently fill the other's
-// flag, which is exactly the class of mix-up the shell mapping allowed.
-func TestGotunConf_MappingsDoNotShareFlagNames(t *testing.T) {
-	for key, f := range WatchFlags {
-		for ikey, iface := range IPsecFlags {
-			if f == iface {
-				t.Errorf("%s and %s both map to -%s", key, ikey, f)
+// Where two mappings over one file use the same flag name, it must come from
+// the same key.
+//
+// Sharing a name is not in itself wrong -- GOTUN_IPSEC_IFID feeds -if-id for
+// both `gotun ipsec` and `gotun ikev2`, deliberately, because it is one number
+// and a device and a connection carrying different if_ids negotiate perfectly
+// and then deliver packets nowhere. What must not happen is two *different*
+// keys feeding one flag name, because then one command's setting silently fills
+// another's flag, which is the class of mix-up the shell mapping allowed.
+func TestGotunConf_SharedFlagNamesComeFromOneKey(t *testing.T) {
+	owner := map[string]string{} // flag name -> the key allowed to set it
+	for _, m := range GotunConf.Mappings {
+		for key, name := range m {
+			if prev, seen := owner[name]; seen && prev != key {
+				t.Errorf("-%s is fed by both %s and %s; one command's setting would fill"+
+					" the other's flag", name, prev, key)
 			}
+			owner[name] = key
+		}
+	}
+}
+
+// The gateway settings must reach `gotun ikev2 user add`, the command that
+// issues a credential and writes the profile in one step. Before this, every
+// invocation repeated a dozen flags describing the same gateway, and each
+// repetition was a chance to describe one slightly unlike the gateway running
+// -- which yields a profile that installs cleanly and then does not connect.
+func TestInto_IKEv2GatewayComesFromTheConfig(t *testing.T) {
+	conf, err := Load(filepath.Join("../../deploy/openwrt", "gotun.conf.example"), GotunConf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := flag.NewFlagSet("ikev2 user add", flag.ContinueOnError)
+	vals := map[string]*string{}
+	for _, name := range IKEv2UserFlags {
+		vals[name] = fs.String(name, "", "")
+	}
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.Into(fs, IKEv2UserFlags); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ flag, want string }{
+		{"gateway-id", "vpn.home"},
+		{"vip-subnet", "10.231.17.0/24"},
+		{"vip-gateway", "10.231.17.1"},
+		{"pool", "10.231.17.16/28"},
+		{"dns-match", "all"},
+		{"dir", "/etc/swanctl/conf.d"},
+		{"if-id", "0x61"}, // GOTUN_IPSEC_IFID, shared with gotun ipsec
+	} {
+		if got := *vals[c.flag]; got != c.want {
+			t.Errorf("-%s = %q, want %q", c.flag, got, c.want)
 		}
 	}
 }

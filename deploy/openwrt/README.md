@@ -452,13 +452,38 @@ ssh root@router 'cd /etc/swanctl
       --flag serverAuth --lifetime 3650 --outform pem > x509/gotun-gw.pem
   chmod 600 private/gotun-ca.key private/gotun-gw.key'
 
-gotun ikev2 -server <public-ip> -gateway-id vpn.home \
-  -ca /etc/swanctl/x509ca/gotun-ca.pem -server-cert gotun-gw.pem \
-  -vip-subnet 10.231.17.0/24 -vip-gateway 10.231.17.1 -pool 10.231.17.16/28 \
-  -if-id 0x61 -families v4 \
+gotun ikev2 -config /etc/gotun/gotun.conf \
   -out-swanctl /etc/swanctl/conf.d/gotun-ikev2.conf
-gotun ikev2 user add <name> ...   # the same flags, plus -probe-url and -home-ssid
 ```
+
+The gateway itself is described once, in the `GOTUN_IKEV2_*` block of
+`/etc/gotun/gotun.conf` — see `gotun.conf.example` for the block and what each
+setting is for. That file lives on the router and nowhere else: it names this
+deployment's public address, its Wi-Fi networks and its certificate paths, none
+of which belong in a repository. The example is the template; the real one is
+never committed.
+
+Issuing a credential is then one line, and adding `-config` to any other
+`gotun ikev2 user` subcommand works the same way:
+
+```sh
+gotun ikev2 user add <name> -config /etc/gotun/gotun.conf \
+  -out-profile /tmp/<name>.mobileconfig
+```
+
+That writes the credential, prints the password once, reloads charon and writes
+the profile. The profile carries **no password** — it is typed into the phone
+once and kept in its keychain — so the file itself is not a credential and can
+be sent over anything. `gotun ikev2 user profile <name> -config ...` reissues it
+at any time without changing the password, and installs over the old one because
+the UUID comes from the identifier rather than being random.
+
+A flag passed explicitly still wins over the file, which is what makes a one-off
+variation possible without editing the config. And there is deliberately no
+`GOTUN_IKEV2_IFID`: the interface id is `GOTUN_IPSEC_IFID`, the same key
+`gotun ipsec` reads, because it is one number — a connection and a device
+carrying different `if_id`s negotiate perfectly and then deliver packets
+nowhere.
 
 Put the gateway certificate's **public** address in a SAN and pass it as
 `-gateway-id`: iOS authenticates the server and then checks the identifier

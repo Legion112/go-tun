@@ -82,6 +82,49 @@ var IPsecFlags = Mapping{
 	"GOTUN_IPSEC_PARENT": "parent",
 }
 
+// IKEv2Flags is the gateway an IKEv2 profile describes, read by `gotun ikev2`
+// and by every `gotun ikev2 user` subcommand.
+//
+// It exists so that issuing a credential is `gotun ikev2 user add <name>` and
+// not that plus a dozen flags describing the same gateway each time. Every one
+// of those was a chance to generate a profile for a gateway slightly unlike the
+// one that is running, which installs cleanly and then does not connect.
+//
+// The interface id is deliberately GOTUN_IPSEC_IFID, the same key `gotun ipsec`
+// reads: it is one number, it has to match the xfrm device the CHILD_SA
+// surfaces on, and a device and a connection carrying different if_ids
+// negotiate perfectly and then deliver packets nowhere.
+var IKEv2Flags = Mapping{
+	"GOTUN_IKEV2_SERVER":       "server",
+	"GOTUN_IKEV2_GATEWAY_ID":   "gateway-id",
+	"GOTUN_IKEV2_VIP_SUBNET":   "vip-subnet",
+	"GOTUN_IKEV2_VIP_GATEWAY":  "vip-gateway",
+	"GOTUN_IKEV2_POOL":         "pool",
+	"GOTUN_IKEV2_FAMILIES":     "families",
+	"GOTUN_IKEV2_NON_ROUTABLE": "non-routable",
+	"GOTUN_IKEV2_CA":           "ca",
+	"GOTUN_IKEV2_SERVER_CERT":  "server-cert",
+	"GOTUN_IKEV2_PROBE_URL":    "probe-url",
+	"GOTUN_IKEV2_HOME_SSID":    "home-ssid",
+	"GOTUN_IKEV2_DNS_MATCH":    "dns-match",
+	"GOTUN_IKEV2_DPD":          "dpd",
+	"GOTUN_IKEV2_ON_DEMAND":    "on-demand",
+	"GOTUN_IKEV2_KEEPALIVE":    "keepalive",
+	"GOTUN_IKEV2_NAME":         "name",
+	"GOTUN_IKEV2_IDENTIFIER":   "identifier",
+	"GOTUN_IPSEC_IFID":         "if-id",
+}
+
+// IKEv2DirFlags is for the user subcommands that describe no gateway --
+// `list` and `revoke` need to find the credentials and nothing more.
+var IKEv2DirFlags = Mapping{
+	"GOTUN_IKEV2_USER_DIR": "dir",
+}
+
+// IKEv2UserFlags is the gateway plus the credential directory, for the
+// subcommands that write a profile.
+var IKEv2UserFlags = union(IKEv2Flags, IKEv2DirFlags)
+
 // DNSFlags is what gotun-dns reads.
 var DNSFlags = Mapping{
 	"GOTUN_DNS_LISTEN": "listen",
@@ -115,7 +158,7 @@ type Schema struct {
 var (
 	GotunConf = Schema{
 		File:     "/etc/gotun/gotun.conf",
-		Mappings: []Mapping{WatchFlags, IPsecFlags},
+		Mappings: []Mapping{WatchFlags, IPsecFlags, IKEv2UserFlags},
 	}
 	GotunDNSConf = Schema{
 		File:     "/etc/gotun/gotun-dns.conf",

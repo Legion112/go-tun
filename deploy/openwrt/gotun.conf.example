@@ -60,6 +60,97 @@ GOTUN_IPSEC_MTU=1400
 # home LAN.
 GOTUN_IPSEC_PARENT=lo
 
+# ---------------------------------------------------------------------------
+# The IKEv2 gateway, as a phone's configuration profile describes it.
+#
+# Read by `gotun ikev2` and by every `gotun ikev2 user` subcommand, so issuing a
+# credential is `gotun ikev2 user add <name> -config /etc/gotun/gotun.conf` and
+# not that plus a dozen flags repeating the same gateway. Every repetition was a
+# chance to describe a gateway slightly unlike the one running -- which produces
+# a profile that installs cleanly and then does not connect.
+#
+# Note there is no GOTUN_IKEV2_IFID: the interface id is GOTUN_IPSEC_IFID above,
+# because it is one number. A connection and a device carrying different if_ids
+# negotiate perfectly and then deliver packets nowhere.
+
+# The address the phone dials, which must be reachable from the internet and
+# must appear in the gateway certificate's SANs. Not GOTUN_ENDPOINT -- that is
+# the tunnel's own peer, a different machine entirely.
+GOTUN_IKEV2_SERVER=203.0.113.10
+
+# The identity the gateway presents, and the certificate's CN. The phone checks
+# the certificate against this name, so the two cannot drift.
+GOTUN_IKEV2_GATEWAY_ID=vpn.home
+
+# The virtual network clients land on. The gateway address is what the pool
+# pushes as the phone's resolver, so it has to be inside the subnet and has to
+# be the address gotun-dns is reachable on from the tunnel.
+GOTUN_IKEV2_VIP_SUBNET=10.231.17.0/24
+GOTUN_IKEV2_VIP_GATEWAY=10.231.17.1
+GOTUN_IKEV2_POOL=10.231.17.16/28
+
+# Which address families to emit traffic selectors for. Leaving IPv6 out means
+# the phone keeps its IPv6 on the carrier, and every IPv6-capable destination
+# sees its real address -- on an IPv6-only mobile network that is most of the
+# traffic.
+GOTUN_IKEV2_FAMILIES=v4
+
+# Destinations the phone must never tunnel, so its own LAN keeps working.
+# Empty means the built-in private, CGNAT, link-local, loopback and multicast
+# space, which is what you want.
+GOTUN_IKEV2_NON_ROUTABLE=
+
+# The CA to put in the profile, as a trust payload. Without it a self-signed
+# gateway is rejected with a generic connect error that says nothing about
+# trust.
+GOTUN_IKEV2_CA=/etc/swanctl/x509ca/gotun-ca.pem
+
+# The gateway certificate, only needed when the profile should pin it rather
+# than trust the CA for any name. Empty is the usual case.
+GOTUN_IKEV2_SERVER_CERT=
+
+# What the phone fetches over its physical interface to decide whether to
+# connect -- `gotun watch -health-listen` on the gateway's PUBLIC address,
+# published through every NAT in front of it. Without it the profile connects
+# unconditionally and can sit in "connecting" against a gateway that is down.
+GOTUN_IKEV2_PROBE_URL=http://203.0.113.10:8443/alive
+
+# Wi-Fi networks on which not to connect, comma-separated. List every SSID
+# served by this router, including guest ones: the tunnel would otherwise
+# hairpin out and back through the same uplink, and an upstream router without
+# NAT hairpin cannot do that at all, so the phone just fails to connect at home.
+GOTUN_IKEV2_HOME_SSID=HomeWiFi,HomeWiFi-5G
+
+# Which DNS queries the phone sends to the gateway's resolver. A split tunnel is
+# not the default route, so iOS treats the pushed resolver as supplemental and
+# consults it only for domains named here -- "none" means it is configured and
+# then never used, which is measurably what happens.
+GOTUN_IKEV2_DNS_MATCH=all
+
+# DeadPeerDetectionRate: None, Low (30m), Medium (10m) or High (1m). This is
+# also the fail-open latency, so it trades battery against availability.
+GOTUN_IKEV2_DPD=High
+
+# Let iOS bring the tunnel up by itself. false ships a profile connected by
+# hand, which is the right first test against a gateway whose reachability is
+# not yet proven.
+GOTUN_IKEV2_ON_DEMAND=true
+
+# NAT keepalive, in seconds. Below the shortest NAT timeout in the path, or the
+# mapping is dropped and the phone goes quiet until it next sends something.
+GOTUN_IKEV2_KEEPALIVE=110
+
+# What the VPN entry is called on the phone, and the reverse-DNS prefix of the
+# payload identifiers. The identifier decides the profile's UUID, so keeping it
+# stable is what lets a reissued profile install over the old one instead of
+# beside it.
+GOTUN_IKEV2_NAME=gotun
+GOTUN_IKEV2_IDENTIFIER=
+
+# Where the per-user credential snippets live. swanctl includes conf.d/*.conf,
+# which is what makes one file per user possible.
+GOTUN_IKEV2_USER_DIR=/etc/swanctl/conf.d
+
 # Hosts whose own traffic is never classified, matched on source address.
 # Comma-separated, bare addresses allowed.
 #

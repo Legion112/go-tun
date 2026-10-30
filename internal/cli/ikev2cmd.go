@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/legion/go-tun/internal/deployconf"
 	"github.com/legion/go-tun/internal/ikev2"
 	"github.com/legion/go-tun/internal/policy"
 	"github.com/legion/go-tun/internal/prefixes"
@@ -21,6 +22,10 @@ func runIKEv2(args []string) error {
 	outSwanctl := fs.String("out-swanctl", "swanctl-phone.conf", "output path for the gateway configuration")
 	outProfile := fs.String("out-profile", "phone.mobileconfig", "output path for the iOS profile")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// IKEv2Flags, not IKEv2UserFlags: this command has no -dir.
+	if err := loadConfigInto(fs, *f.configPath, deployconf.IKEv2Flags); err != nil {
 		return err
 	}
 	// Refused rather than ignored: "gotun ikev2 -server x user add alice" is a
@@ -42,6 +47,7 @@ func runIKEv2(args []string) error {
 // `ikev2 user add`. One registrar rather than two, because a -vip-subnet that
 // meant something different in each would orphan every user already issued.
 type ikev2Flags struct {
+	configPath                  *string
 	server, gatewayID, clientID *string
 	vipSubnet, vipGateway, pool *string
 	nonRoutable, families       *string
@@ -101,6 +107,9 @@ func registerIKEv2Flags(fs *flag.FlagSet) *ikev2Flags {
 			" This is also the fail-open latency, so it trades battery against availability")
 	f.keepalive = fs.Int("keepalive", ikev2.DefaultKeepAliveInterval,
 		"NAT keepalive seconds (Apple's minimum is 20); offloaded to hardware, so it costs no wakeup")
+	f.configPath = fs.String("config", "",
+		"read the gateway's settings from this /etc/gotun/gotun.conf, so they do not have to be"+
+			" repeated on every invocation. A flag passed explicitly still wins")
 	f.name = fs.String("name", "gotun", "what the VPN entry is called on the phone")
 	f.identifier = fs.String("identifier", "", "reverse-DNS payload identifier prefix")
 	return f

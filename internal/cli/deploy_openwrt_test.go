@@ -622,6 +622,9 @@ func TestSchemaFlagsResolve(t *testing.T) {
 		{"gotun watch", watchFlagSet(), deployconf.WatchFlags},
 		{"gotun ipsec", ipsecFlagSet(), deployconf.IPsecFlags},
 		{"gotun dnswatch", dnsWatchFlagSet(), deployconf.DNSWatchFlags},
+		{"gotun ikev2", ikev2FlagSet(false), deployconf.IKEv2Flags},
+		{"gotun ikev2 user add", ikev2FlagSet(true), deployconf.IKEv2UserFlags},
+		{"gotun ikev2 user list", dirOnlyFlagSet(), deployconf.IKEv2DirFlags},
 	} {
 		for key, name := range c.m {
 			if lookup(c.fs, name) == nil {
@@ -653,6 +656,23 @@ func TestGotunDNSWatchInitFlagsExist(t *testing.T) {
 func ipsecFlagSet() *flag.FlagSet {
 	fs := flag.NewFlagSet("ipsec up", flag.ContinueOnError)
 	registerIPsecFlags(fs)
+	return fs
+}
+
+// withDir mirrors the user subcommands, which register -dir on top of the
+// shared gateway flags.
+func ikev2FlagSet(withDir bool) *flag.FlagSet {
+	fs := flag.NewFlagSet("ikev2", flag.ContinueOnError)
+	registerIKEv2Flags(fs)
+	if withDir {
+		fs.String("dir", DefaultUserDir, "")
+	}
+	return fs
+}
+
+func dirOnlyFlagSet() *flag.FlagSet {
+	fs := flag.NewFlagSet("ikev2 user list", flag.ContinueOnError)
+	fs.String("dir", DefaultUserDir, "")
 	return fs
 }
 
