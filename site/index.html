@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gotun — российское напрямую, остальное через туннель</title>
-<meta name="description" content="gotun — шлюз раздельного туннелирования для дома: российские адреса идут через провайдера, всё остальное — через ваш WireGuard-сервер. Linux и OpenWrt.">
+<meta name="description" content="gotun — шлюз раздельного туннелирования для дома: российские адреса идут через провайдера, всё остальное — через ваш собственный туннель. Linux и OpenWrt.">
 <meta property="og:title" content="gotun — split-tunnel gateway">
-<meta property="og:description" content="Russian destinations go direct. Everything else rides your own WireGuard tunnel. Self-hosted, Linux & OpenWrt.">
+<meta property="og:description" content="Russian destinations go direct. Everything else rides your own tunnel. Self-hosted, Linux & OpenWrt.">
 <meta property="og:type" content="website">
 <meta name="color-scheme" content="light dark">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -389,8 +389,8 @@ footer a:hover { color: var(--text); }
       <h1 lang="ru"><span class="d">Российское —</span> напрямую. <span class="t">Остальное —</span> через ваш туннель.</h1>
       <h1 lang="en"><span class="d">Russian traffic</span> goes direct. <span class="t">Everything else</span> rides your tunnel.</h1>
 
-      <p class="lead" lang="ru">gotun работает на роутере или Raspberry Pi и решает за каждое устройство в доме: <b>адреса в России идут через вашего провайдера</b>, <b>всё остальное — через ваш WireGuard-сервер за рубежом</b>. Ноутбукам, телевизорам и телефонам не нужны ни приложения, ни правила.</p>
-      <p class="lead" lang="en">gotun runs on your router or a Raspberry Pi and makes the call for every device in the house: <b>Russian addresses leave through your ISP</b>, <b>everything else through your own WireGuard server abroad</b>. Laptops, TVs and phones need no apps and no rules.</p>
+      <p class="lead" lang="ru">gotun работает на роутере или Raspberry Pi и решает за каждое устройство в доме: <b>адреса в России идут через вашего провайдера</b>, <b>всё остальное — через ваш туннель к серверу за рубежом</b>. Ноутбукам, телевизорам и телефонам не нужны ни приложения, ни правила.</p>
+      <p class="lead" lang="en">gotun runs on your router or a Raspberry Pi and makes the call for every device in the house: <b>Russian addresses leave through your ISP</b>, <b>everything else through your own tunnel to a server abroad</b>. Laptops, TVs and phones need no apps and no rules.</p>
 
       <div class="ctas">
         <a class="btn btn-primary" href="#start">
@@ -440,8 +440,8 @@ footer a:hover { color: var(--text); }
           <rect class="dg-ex" x="600" y="180" width="210" height="100" rx="16"/>
           <text class="dg-title" x="705" y="222" text-anchor="middle" lang="ru">Остальной мир</text>
           <text class="dg-title" x="705" y="222" text-anchor="middle" lang="en">Everything else</text>
-          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="ru">через ваш WireGuard-выход</text>
-          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="en">via your WireGuard exit</text>
+          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="ru">через ваш выходной туннель</text>
+          <text class="dg-sub" x="705" y="246" text-anchor="middle" lang="en">via your exit tunnel</text>
         </svg>
 
         <!-- Phone layout: the same picture, top to bottom. -->
@@ -482,12 +482,13 @@ footer a:hover { color: var(--text); }
           <text class="dg-title" x="270" y="380" text-anchor="middle" lang="en">Everything else</text>
           <text class="dg-sub" x="270" y="404" text-anchor="middle" lang="ru">через ваш</text>
           <text class="dg-sub" x="270" y="404" text-anchor="middle" lang="en">via your</text>
-          <text class="dg-sub" x="270" y="422" text-anchor="middle">WireGuard</text>
+          <text class="dg-sub" x="270" y="422" text-anchor="middle" lang="ru">туннель</text>
+          <text class="dg-sub" x="270" y="422" text-anchor="middle" lang="en">tunnel</text>
         </svg>
 
         <figcaption class="legend">
           <span class="ld"><i></i><span lang="ru">напрямую</span><span lang="en">direct</span></span>
-          <span class="lt"><i></i><span lang="ru">через туннель WireGuard</span><span lang="en">through the WireGuard tunnel</span></span>
+          <span class="lt"><i></i><span lang="ru">через туннель</span><span lang="en">through the tunnel</span></span>
         </figcaption>
       </figure>
 
@@ -525,11 +526,11 @@ footer a:hover { color: var(--text); }
           <p lang="en">Banks, government services, delivery and streaming behave as if there were no tunnel: their traffic and DNS go straight out through your ISP.</p>
         </div>
         <div class="why-card t">
-          <span class="tag">wg-exit</span>
+          <span class="tag">tunnel</span>
           <h3 lang="ru">Остальное — через сервер, который вы контролируете</h3>
           <h3 lang="en">Everything else goes through a server you control</h3>
-          <p lang="ru">Зарубежный трафик уходит через ваш собственный WireGuard-сервер. Никаких чужих подписок и аккаунтов.</p>
-          <p lang="en">Foreign traffic leaves through your own WireGuard server. No third-party subscriptions, no accounts.</p>
+          <p lang="ru">Зарубежный трафик уходит через ваш собственный выходной сервер. Никаких чужих подписок и аккаунтов.</p>
+          <p lang="en">Foreign traffic leaves through your own exit server. No third-party subscriptions, no accounts.</p>
         </div>
         <div class="why-card n">
           <span class="tag">clients: dumb</span>
@@ -554,8 +555,8 @@ footer a:hover { color: var(--text); }
         <div class="feat">
           <div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg></div>
           <h3 lang="ru">Работает ядро</h3><h3 lang="en">The kernel does the work</h3>
-          <p lang="ru">nftables, policy routing и WireGuard. gotun только приводит состояние ядра к нужному — пакеты через себя не гоняет.</p>
-          <p lang="en">nftables, policy routing and WireGuard. gotun only reconciles kernel state — packets never pass through it.</p>
+          <p lang="ru">nftables и policy routing поверх любого туннеля: WireGuard, sing-box или другого интерфейса. gotun только приводит состояние ядра к нужному — пакеты через себя не гоняет.</p>
+          <p lang="en">nftables and policy routing on top of any tunnel: WireGuard, sing-box or any other interface. gotun only reconciles kernel state — packets never pass through it.</p>
         </div>
         <div class="feat">
           <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
@@ -697,7 +698,7 @@ footer a:hover { color: var(--text); }
 <span class="p">$ </span>gotun fetch -country RU -out prefixes.txt
 <span class="p">$ </span>sudo gotun apply -prefixes prefixes.txt \
     -endpoint &lt;exit-server-ip&gt; -lan 192.168.1.0/24 \
-    -wg-config wg-exit.conf -tunnel-up true</code></pre></div>
+    -tunnel-iface &lt;tunnel-device&gt; -tunnel-up true</code></pre></div>
         <p class="panel-note" lang="ru"><code>arm64</code> — для Raspberry Pi на 64-битной ОС, для мини-ПК замените на <code>amd64</code>. Откат — <code>sudo gotun clear</code>: он убирает только то, что создал gotun. Подробности в <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
         <p class="panel-note" lang="en"><code>arm64</code> is for a Raspberry Pi on a 64-bit OS; on a mini PC use <code>amd64</code>. To roll back, <code>sudo gotun clear</code> removes only what gotun created. Details in the <a href="https://github.com/Legion112/go-tun#readme">README</a>.</p>
       </div>
@@ -727,7 +728,7 @@ footer a:hover { color: var(--text); }
 
       <div class="req">
         <div><b lang="ru">Linux или OpenWrt</b><b lang="en">Linux or OpenWrt</b><span lang="ru">с nftables: Raspberry Pi, мини-ПК или роутер</span><span lang="en">with nftables: a Raspberry Pi, a mini PC or a router</span></div>
-        <div><b lang="ru">Свой сервер вне России</b><b lang="en">Your own server abroad</b><span lang="ru">любой VPS с WireGuard</span><span lang="en">any VPS running WireGuard</span></div>
+        <div><b lang="ru">Свой сервер вне России</b><b lang="en">Your own server abroad</b><span lang="ru">любой VPS, до которого поднят туннель</span><span lang="en">any VPS your gateway tunnels to</span></div>
         <div><b lang="ru">Готовый бинарник</b><b lang="en">A prebuilt binary</b><span>amd64 · arm64 · armv7 · mips · mipsle</span></div>
         <div><b lang="ru">Ключ MaxMind</b><b lang="en">A MaxMind key</b><span lang="ru">бесплатный, для GeoLite2</span><span lang="en">free, for GeoLite2</span></div>
       </div>
